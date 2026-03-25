@@ -11,6 +11,13 @@ from utils import logger
 
 load_dotenv()
 
+# Modell-Auswahl:
+# - claude-haiku-4-5-20251001  → für Batch (günstig, schnell)
+# - claude-sonnet-4-6          → für Einzel-PDF (bessere Qualität)
+# - claude-opus-4-6            → für schwierige Fälle
+DEFAULT_BATCH_MODEL = os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001")
+DEFAULT_SINGLE_MODEL = os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6")
+
 # Klassifizierungsergebnis-Struktur
 EMPTY_RESULT = {
     "segmentierung": "unklar",
@@ -61,6 +68,7 @@ def classify_prospectus(
     fund_name: str = "",
     additional_context: str = "",
     api_key: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """
     Klassifiziert einen Fondsprospekt-Text via Claude API.
@@ -71,6 +79,7 @@ def classify_prospectus(
         fund_name: Name des Fonds (für Kontext)
         additional_context: Zusätzliche Informationen (z.B. aus Web-Suche)
         api_key: Anthropic API-Key (optional, sonst aus .env)
+        model: Claude-Modell (optional; Standard: haiku für Batch, sonnet für Einzel)
 
     Returns:
         Dict mit segmentierung, fondstyp, anlegertyp, kundentyp, begruendung, konfidenz
@@ -79,6 +88,7 @@ def classify_prospectus(
     if not key:
         raise ValueError("Kein ANTHROPIC_API_KEY gefunden. Bitte .env Datei prüfen.")
 
+    selected_model = model or DEFAULT_BATCH_MODEL
     client = anthropic.Anthropic(api_key=key)
 
     # Prompt aufbauen
@@ -94,23 +104,21 @@ def classify_prospectus(
 
     user_message = "".join(user_content)
 
-    logger.info(f"Sende {len(user_message):,} Zeichen an Claude API (ISIN: {isin})")
+    logger.info(f"Sende {len(user_message):,} Zeichen an Claude API (ISIN: {isin}, Modell: {selected_model})")
 
     try:
-        # Streaming für lange Dokumente
-        result_text = ""
-        with client.messages.stream(
-            model="claude-opus-4-6",
-            max_tokens=1024,
-            thinking={"type": "adaptive"},
+        response = client.messages.create(
+            model=selected_model,
+            max_tokens=512,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
-        ) as stream:
-            for event in stream:
-                if hasattr(event, "type") and event.type == "content_block_delta":
-                    delta = event.delta
-                    if hasattr(delta, "type") and delta.type == "text_delta":
-                        result_text += delta.text
+        )
+
+        # Text-Block aus der Antwort extrahieren
+        result_text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                result_text += block.text
 
         logger.info(f"Claude Antwort erhalten ({len(result_text)} Zeichen)")
 

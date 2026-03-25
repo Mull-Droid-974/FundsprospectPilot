@@ -1,197 +1,136 @@
 """
-fundinfo.com Scraping und PDF-Download.
+fundinfo.com Prospekt-Download via JSON API.
 
-Strategie:
-1. Suche auf fundinfo.com nach der ISIN
-2. Finde den Link zum Verkaufsprospekt
-3. Lade die PDF herunter
+Endpoint (verifiziiert):
+  GET https://www.fundinfo.com/en/{profile}/LandingPage/Data
+      ?skip=0&query={ISIN}&orderdirection=desc
+
+Response-Struktur:
+  Data[0].D["PR"]  →  Liste von Prospekt-Dokumenten
 """
 
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, quote
 
 import requests
-from bs4 import BeautifulSoup
 
 from utils import logger, build_pdf_filename, get_next_pdf_number
 
-# Browser-ähnliche Headers, um 403 zu vermeiden
+# Profile-Reihenfolge bei Fallback
+PROFILES = ["CH-prof", "CH-pub", "DE-prof", "LU-prof", "AT-prof"]
+
+# Sprach-Präferenz für Prospekte
+LANG_PREFERENCE = ["DE", "EN", "FR", "IT", "ES"]
+
+# Browser-ähnliche Headers (verhindert 403-Fehler)
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "de-CH,de;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": "https://www.fundinfo.com/",
 }
 
-REQUEST_TIMEOUT = 30  # Sekunden
-REQUEST_DELAY = 1.5   # Sekunden zwischen Requests
+# Cookies für fundinfo.com
+COOKIES = {
+    "DU": "CH-prof",
+    "PrivacyPolicy": "1",
+}
+
+REQUEST_TIMEOUT = 30
+
+
+@dataclass
+class DownloadResult:
+    pdf_path: str
+    pdf_url: str
+    language: str
+    profile: str
 
 
 def _get_session() -> requests.Session:
-    """Erstellt eine requests.Session mit Browser-Headers."""
+    """Erstellt eine Session mit Browser-Headers und Cookies."""
     session = requests.Session()
     session.headers.update(HEADERS)
+    session.cookies.update(COOKIES)
     return session
 
 
-def find_prospectus_url(isin: str, session: Optional[requests.Session] = None) -> Optional[str]:
+def _discover_pdf_url(isin: str, profile: str, session: requests.Session) -> Optional[dict]:
     """
-    Sucht den Verkaufsprospekt für eine ISIN auf fundinfo.com.
+    Ruft die fundinfo.com JSON-API auf und findet den Verkaufsprospekt.
 
     Returns:
-        URL des PDF oder None falls nicht gefunden.
+        {"url": "...", "language": "DE", "date": "2024-01-01"} oder None
     """
-    if session is None:
-        session = _get_session()
+    api_url = f"https://www.fundinfo.com/en/{profile}/LandingPage/Data"
+    params = {
+        "skip": 0,
+        "query": isin,
+        "orderdirection": "desc",
+    }
 
-    strategies = [
-        _try_direct_isin_url,
-        _try_search_url,
-    ]
+    try:
+        resp = session.get(api_url, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
 
-    for strategy in strategies:
-        try:
-            url = strategy(isin, session)
-            if url:
-                logger.info(f"Prospekt gefunden für {isin}: {url[:80]}...")
-                return url
-        except Exception as e:
-            logger.debug(f"Strategie {strategy.__name__} fehlgeschlagen für {isin}: {e}")
+        # Dokumente aus der Antwort extrahieren
+        items = data.get("Data", [])
+        if not items:
+            return None
 
-    logger.warning(f"Kein Prospekt auf fundinfo.com gefunden für ISIN: {isin}")
-    return None
+        # Verkaufsprospekte (Typ "PR") aus dem ersten Ergebnis
+        docs = items[0].get("D", {}).get("PR", [])
+        if not docs:
+            return None
 
+        # Nur aktive Dokumente, nach Datum sortiert, Sprache priorisiert
+        active = [d for d in docs if d.get("Active", True)]
+        if not active:
+            active = docs  # Fallback: alle nehmen
 
-def _try_direct_isin_url(isin: str, session: requests.Session) -> Optional[str]:
-    """Versucht den direkten Pfad: fundinfo.com/de/{isin}"""
-    base_urls = [
-        f"https://fundinfo.com/de/{isin}",
-        f"https://fundinfo.com/en/{isin}",
-        f"https://www.fundinfo.com/de/{isin}",
-    ]
+        def sort_key(doc):
+            lang = doc.get("Language", "XX")
+            lang_rank = LANG_PREFERENCE.index(lang) if lang in LANG_PREFERENCE else 99
+            date_str = doc.get("Date", "1900-01-01")
+            return (lang_rank, date_str)  # niedrigerer Rang = bevorzugt
 
-    for base_url in base_urls:
-        try:
-            resp = session.get(base_url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-            if resp.status_code == 200:
-                pdf_url = _extract_prospectus_link(resp.text, base_url)
-                if pdf_url:
-                    return pdf_url
-        except requests.RequestException:
-            continue
+        best = sorted(active, key=sort_key)[0]
 
-    return None
+        return {
+            "url": best.get("Url", ""),
+            "language": best.get("Language", ""),
+            "date": best.get("Date", ""),
+        }
 
-
-def _try_search_url(isin: str, session: requests.Session) -> Optional[str]:
-    """Sucht via fundinfo.com Suchfunktion."""
-    search_urls = [
-        f"https://fundinfo.com/de/search?q={quote(isin)}",
-        f"https://fundinfo.com/search?q={quote(isin)}",
-    ]
-
-    for search_url in search_urls:
-        try:
-            resp = session.get(search_url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # Ersten Suchergebnis-Link finden
-            fund_link = None
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if isin.lower() in href.lower() or (
-                    any(x in href for x in ["/fund/", "/fonds/", "/de/", "/en/"])
-                    and len(href) > 20
-                ):
-                    fund_link = href
-                    break
-
-            if fund_link:
-                if not fund_link.startswith("http"):
-                    fund_link = urljoin("https://fundinfo.com", fund_link)
-
-                time.sleep(0.5)
-                resp2 = session.get(fund_link, timeout=REQUEST_TIMEOUT)
-                if resp2.status_code == 200:
-                    pdf_url = _extract_prospectus_link(resp2.text, fund_link)
-                    if pdf_url:
-                        return pdf_url
-
-        except requests.RequestException:
-            continue
-
-    return None
+    except requests.RequestException as e:
+        logger.debug(f"fundinfo API Fehler (Profil {profile}): {e}")
+        return None
+    except (KeyError, IndexError, ValueError) as e:
+        logger.debug(f"fundinfo Antwort Parse-Fehler (Profil {profile}): {e}")
+        return None
 
 
-def _extract_prospectus_link(html: str, base_url: str) -> Optional[str]:
-    """Extrahiert den Link zum Verkaufsprospekt aus einer HTML-Seite."""
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Deutsche und englische Schlüsselwörter für Prospekte
-    keywords = [
-        "verkaufsprospekt",
-        "sales prospectus",
-        "prospectus",
-        "prospekt",
-        "offering document",
-    ]
-
-    # Alle Links durchsuchen
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        link_text = a.get_text(strip=True).lower()
-
-        # PDF-Link mit passendem Text?
-        if href.lower().endswith(".pdf"):
-            if any(kw in link_text for kw in keywords):
-                if not href.startswith("http"):
-                    href = urljoin(base_url, href)
-                return href
-
-        # Link-Text enthält Prospekt-Keyword?
-        if any(kw in link_text for kw in keywords):
-            if ".pdf" in href.lower() or "document" in href.lower():
-                if not href.startswith("http"):
-                    href = urljoin(base_url, href)
-                return href
-
-    # Fallback: Irgendein PDF-Link auf der Seite
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.lower().endswith(".pdf") and len(href) > 20:
-            if not href.startswith("http"):
-                href = urljoin(base_url, href)
-            return href
-
-    return None
-
-
-def download_pdf(
+def _download_pdf(
     url: str,
     pdf_folder: str,
     fund_name: str,
-    session: Optional[requests.Session] = None,
+    session: requests.Session,
 ) -> Optional[str]:
     """
-    Lädt eine PDF herunter und speichert sie mit 5-stelliger Nummer.
+    Lädt eine PDF von der URL herunter und validiert sie.
 
     Returns:
-        Pfad zur gespeicherten PDF oder None bei Fehler.
+        Lokaler Dateipfad oder None bei Fehler.
     """
-    if session is None:
-        session = _get_session()
-
     folder = Path(pdf_folder)
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -200,25 +139,38 @@ def download_pdf(
     save_path = folder / filename
 
     try:
-        logger.info(f"Lade PDF herunter: {url[:80]}...")
+        logger.info(f"Lade PDF: {url[:80]}")
         resp = session.get(url, timeout=60, stream=True)
         resp.raise_for_status()
 
-        # Prüfen ob wirklich PDF
-        content_type = resp.headers.get("Content-Type", "")
-        if "pdf" not in content_type.lower() and not url.lower().endswith(".pdf"):
-            logger.warning(f"Kein PDF-Content-Type: {content_type}")
+        # Inhalt in Chunks lesen
+        chunks = []
+        for chunk in resp.iter_content(chunk_size=65536):
+            chunks.append(chunk)
+
+        content = b"".join(chunks)
+
+        # Validierung: Ist es wirklich eine PDF?
+        if not content.startswith(b"%PDF"):
+            logger.warning(f"Heruntergeladene Datei ist keine PDF (Magic Bytes fehlen): {url}")
+            # Trotzdem speichern – manche PDFs haben kleine Header-Offsets
+            if b"%PDF" not in content[:1024]:
+                return None
+
+        # Grössencheck (max 50 MB)
+        size_mb = len(content) / (1024 * 1024)
+        if size_mb > 50:
+            logger.warning(f"PDF zu gross ({size_mb:.1f} MB), überspringe: {filename}")
+            return None
 
         with open(save_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.write(content)
 
-        size_kb = save_path.stat().st_size / 1024
-        logger.info(f"PDF gespeichert: {filename} ({size_kb:.0f} KB)")
+        logger.info(f"PDF gespeichert: {filename} ({size_mb:.1f} MB)")
         return str(save_path)
 
     except requests.RequestException as e:
-        logger.error(f"Download-Fehler für {url}: {e}")
+        logger.error(f"Download-Fehler: {e}")
         if save_path.exists():
             save_path.unlink()
         return None
@@ -228,23 +180,40 @@ def fetch_prospectus(
     isin: str,
     fund_name: str,
     pdf_folder: str,
-    delay: float = REQUEST_DELAY,
-) -> Optional[str]:
+    delay: float = 1.5,
+) -> Optional[DownloadResult]:
     """
-    Kompletter Workflow: Suche + Download.
+    Kompletter Workflow: Suche + Download für eine ISIN.
+
+    Probiert mehrere fundinfo.com Profile (CH-prof → CH-pub → DE-prof → LU-prof).
 
     Returns:
-        Lokaler PDF-Pfad oder None falls fehlgeschlagen.
+        DownloadResult mit lokalem Pfad, oder None falls nicht gefunden.
     """
     session = _get_session()
 
-    # Kurze Pause zwischen Requests (Rate Limiting)
-    time.sleep(delay)
+    for profile in PROFILES:
+        # Rate Limiting
+        time.sleep(delay)
 
-    pdf_url = find_prospectus_url(isin, session)
-    if not pdf_url:
-        return None
+        logger.info(f"Suche Prospekt für {isin} (Profil: {profile})")
+        doc_info = _discover_pdf_url(isin, profile, session)
 
-    time.sleep(0.5)
+        if not doc_info or not doc_info.get("url"):
+            logger.debug(f"Kein Prospekt gefunden in Profil {profile}")
+            continue
 
-    return download_pdf(pdf_url, pdf_folder, fund_name, session)
+        pdf_url = doc_info["url"]
+        time.sleep(0.5)
+
+        pdf_path = _download_pdf(pdf_url, pdf_folder, fund_name, session)
+        if pdf_path:
+            return DownloadResult(
+                pdf_path=pdf_path,
+                pdf_url=pdf_url,
+                language=doc_info.get("language", ""),
+                profile=profile,
+            )
+
+    logger.warning(f"Kein Prospekt auf fundinfo.com für ISIN: {isin}")
+    return None

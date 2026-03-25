@@ -89,8 +89,11 @@ def process_single_pdf(
             "konfidenz": "niedrig",
         }
 
-    # Falls Konfidenz niedrig → Web-Suche als Ergänzung
-    result = classify_prospectus(text, isin=isin, fund_name=fund_name, api_key=api_key)
+    # Im Einzel-Modus: besseres Modell verwenden
+    from claude_classifier import DEFAULT_SINGLE_MODEL
+    result = classify_prospectus(
+        text, isin=isin, fund_name=fund_name, api_key=api_key, model=DEFAULT_SINGLE_MODEL
+    )
 
     if result.get("konfidenz") == "niedrig" and isin:
         logger.info(f"Konfidenz niedrig für {isin}, starte Web-Suche...")
@@ -98,7 +101,7 @@ def process_single_pdf(
         if web_info:
             result = classify_prospectus(
                 text, isin=isin, fund_name=fund_name,
-                additional_context=web_info, api_key=api_key
+                additional_context=web_info, api_key=api_key, model=DEFAULT_SINGLE_MODEL
             )
 
     return result
@@ -167,12 +170,13 @@ class BatchProcessor:
             # 1. PDF herunterladen
             try:
                 self._emit(ProgressEvent("log", f"  📥 Lade PDF für {isin}..."))
-                pdf_path = fetch_prospectus(
+                dl_result = fetch_prospectus(
                     isin, fund_name, config.pdf_folder, delay=config.request_delay
                 )
-                if pdf_path:
+                if dl_result:
+                    pdf_path = dl_result.pdf_path
                     pdf_filename = Path(pdf_path).name
-                    self._emit(ProgressEvent("log", f"  ✅ PDF: {pdf_filename}"))
+                    self._emit(ProgressEvent("log", f"  ✅ PDF: {pdf_filename} ({dl_result.language}, {dl_result.profile})"))
                 else:
                     self._emit(ProgressEvent("log", f"  ⚠️  Kein PDF auf fundinfo.com gefunden"))
             except Exception as e:
