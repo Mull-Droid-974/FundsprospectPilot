@@ -188,6 +188,41 @@ class App(tk.Tk):
             activebackground=BTN_ACTIVE, activeforeground=fg
         )
 
+    # ─── Sample-PDF Hilfsmethoden ────────────────────────────────
+    def _get_samples_dir(self) -> Path:
+        return Path(__file__).parent.parent / "data" / "samples"
+
+    def _load_sample_pdfs(self) -> list:
+        """Gibt sortierte Liste der PDF-Dateinamen aus data/samples/ zurück."""
+        d = self._get_samples_dir()
+        if not d.exists():
+            return []
+        return sorted(f.name for f in d.iterdir() if f.suffix.lower() == ".pdf")
+
+    def _on_sample_selected(self, event=None):
+        """Füllt Pfadfeld und ISIN automatisch aus wenn Sample gewählt wird."""
+        name = self.var_sample.get()
+        if not name or name == "(kein Sample gefunden)":
+            return
+        full_path = str(self._get_samples_dir() / name)
+        self.var_single_pdf.set(full_path)
+        if not self.var_single_isin.get():
+            isin_match = re.search(r'[A-Z]{2}[A-Z0-9]{10}', Path(name).stem)
+            if isin_match:
+                self.var_single_isin.set(isin_match.group())
+        if not self.var_single_name.get():
+            stem = re.sub(r'^[\d_]+', '', Path(name).stem)
+            stem = re.sub(r'[_-]+', ' ', stem).strip()
+            if stem:
+                self.var_single_name.set(stem)
+
+    def _refresh_samples(self):
+        """Aktualisiert Dropdown-Werte."""
+        names = self._load_sample_pdfs()
+        values = names if names else ["(kein Sample gefunden)"]
+        self.sample_combo["values"] = values
+        self.var_sample.set("")
+
     def _build_single_pdf_panel(self, parent):
         inner = self._panel(parent, "📥 Einzelne PDF analysieren (Prototyp)")
 
@@ -195,6 +230,37 @@ class App(tk.Tk):
             inner, text="PDF-Datei auswählen und direkt analysieren.\nKein Excel nötig.",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8), justify="left"
         ).pack(anchor="w", pady=(0, 8))
+
+        # ── Schnellauswahl aus data/samples/ ──────────────────────
+        sample_row = tk.Frame(inner, bg=BG_PANEL)
+        sample_row.pack(fill="x", pady=(0, 6))
+        sample_row.columnconfigure(1, weight=1)
+
+        tk.Label(
+            sample_row, text="Beispiel-PDF:", bg=BG_PANEL, fg=FG_MUTED,
+            font=("Segoe UI", 9), anchor="w"
+        ).grid(row=0, column=0, sticky="w")
+
+        self.var_sample = tk.StringVar()
+        sample_names = self._load_sample_pdfs()
+        combo_values = sample_names if sample_names else ["(kein Sample gefunden)"]
+
+        self.sample_combo = ttk.Combobox(
+            sample_row, textvariable=self.var_sample,
+            values=combo_values, state="readonly",
+            font=("Segoe UI", 9)
+        )
+        self.sample_combo.grid(row=0, column=1, sticky="ew", padx=(8, 4))
+        self.sample_combo.bind("<<ComboboxSelected>>", self._on_sample_selected)
+
+        tk.Button(
+            sample_row, text="↺", command=self._refresh_samples,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 9), padx=5, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).grid(row=0, column=2)
+
+        ttk.Separator(inner, orient="horizontal").pack(fill="x", pady=(0, 6))
 
         fields = tk.Frame(inner, bg=BG_PANEL)
         fields.pack(fill="x")
