@@ -177,18 +177,26 @@ def _parse_result(text: str, isin: str = "") -> dict:
         return result
 
 
-def validate_api_key(api_key: str) -> bool:
-    """Prüft ob der API-Key gültig ist."""
+def validate_api_key(api_key: str) -> tuple[bool, str]:
+    """
+    Prüft ob der Anthropic API-Key gültig ist.
+
+    Returns:
+        (True, "claude-haiku-4-5-20251001")  bei Erfolg
+        (False, "Fehlermeldung")             bei Fehler
+    """
+    test_model = "claude-haiku-4-5-20251001"
     try:
         client = anthropic.Anthropic(api_key=api_key)
-        # Kleinen Test-Request senden
         client.messages.create(
-            model="claude-haiku-4-5",
+            model=test_model,
             max_tokens=10,
             messages=[{"role": "user", "content": "test"}],
         )
-        return True
+        return True, test_model
     except anthropic.AuthenticationError:
-        return False
-    except Exception:
-        return False
+        return False, "Ungültiger API-Key"
+    except anthropic.PermissionDeniedError:
+        return False, "Zugriff verweigert"
+    except Exception as e:
+        return False, f"Fehler: {str(e)[:120]}"
