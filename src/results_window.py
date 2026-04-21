@@ -35,8 +35,13 @@ _COLS = [
     ("segmentierung", "Segmentierung", 110),
     ("konfidenz",     "Konfidenz",      80),
     ("analysiert_am", "Analysiert am", 130),
-    ("prospekt_pfad", "Prospekt-Datei", 200),
-    ("prospekt_url",  "Prospekt-URL",   180),
+    ("prospekt_pfad",    "Prospekt-Datei",  200),
+    ("prospekt_url",     "Prospekt-URL",    180),
+    ("subfonds_name",    "Unterfonds",      200),
+    ("anteilsklasse",    "Anteilsklasse",   150),
+    ("ausschuettungsart","Ausschüttung",     90),
+    ("fondswaehrung",    "Währung",          70),
+    ("fundinfo_ter",     "TER (API)",        80),
 ]
 _COL_KEYS = [c[0] for c in _COLS]
 

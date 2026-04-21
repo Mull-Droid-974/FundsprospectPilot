@@ -34,10 +34,11 @@ BTN_ACTIVE      = "#585b70"
 _PDF_FOLDER = Path(__file__).parent.parent / "data" / "prospekte"
 
 _COLS = [
-    ("isin",         "ISIN",           130),
-    ("fondsname",    "Fondsname",       220),
-    ("prospekt_pfad","Prospekt-Datei",  220),
-    ("prospekt_url", "Prospekt-URL",    200),
+    ("isin",          "ISIN",           130),
+    ("subfonds_name", "Unterfonds",     220),
+    ("anteilsklasse", "Anteilsklasse",  150),
+    ("prospekt_pfad", "Prospekt-Datei", 200),
+    ("prospekt_url",  "Prospekt-URL",   180),
 ]
 
 
@@ -208,14 +209,14 @@ class DownloadWindow(tk.Toplevel):
             pfad = row.get("prospekt_pfad", "") or ""
             url  = row.get("prospekt_url",  "") or ""
             exists = bool(pfad) and Path(pfad).exists()
-            display_pfad = ("✓ " + Path(pfad).name) if exists else ("— " + Path(pfad).name if pfad else "—")
-            display_url  = url if url else "—"
+            display_pfad = ("✓ " + Path(pfad).name) if exists else "—"
             tag = "ok" if exists else "missing"
             self._tree.insert("", "end", iid=row["isin"], values=(
                 row.get("isin", ""),
-                row.get("fondsname", ""),
+                row.get("subfonds_name", "") or "—",
+                row.get("anteilsklasse", "") or "—",
                 display_pfad,
-                display_url,
+                url or "—",
             ), tags=(tag,))
 
     def _sort_by(self, col: str):
@@ -309,13 +310,16 @@ class DownloadWindow(tk.Toplevel):
             self._log_line(f"[{evt.isin}] {evt.message}" if evt.isin else evt.message)
 
         elif evt.type in ("progress", "error"):
+            phase_label = f"P{evt.phase}"
             prefix = "✓" if evt.type == "progress" else "✗"
-            self._log_line(f"{prefix} [{evt.isin}] {evt.message}")
+            self._log_line(f"{prefix} [{phase_label}] [{evt.isin}] {evt.message}")
             if evt.total > 0:
                 pct = (evt.done + evt.skipped + evt.failed) / evt.total * 100
                 self._prog_var.set(pct)
+                phase_str = "Metadaten" if evt.phase == 1 else "Downloads"
                 self._status_var.set(
-                    f"{evt.done + evt.skipped + evt.failed} / {evt.total}  "
+                    f"Phase {evt.phase} {phase_str}: "
+                    f"{evt.done + evt.skipped + evt.failed}/{evt.total}  "
                     f"✓{evt.done}  ✗{evt.failed}  ⟳{evt.skipped}"
                 )
             # Zeile im Treeview aktualisieren
@@ -328,7 +332,8 @@ class DownloadWindow(tk.Toplevel):
                 try:
                     self._tree.item(evt.isin, values=(
                         row.get("isin", ""),
-                        row.get("fondsname", ""),
+                        row.get("subfonds_name", "") or "—",
+                        row.get("anteilsklasse", "") or "—",
                         display_pfad,
                         url or "—",
                     ), tags=("ok" if exists else "missing",))

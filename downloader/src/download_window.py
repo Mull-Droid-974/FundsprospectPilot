@@ -1,7 +1,8 @@
 """
-Prospekt-Downloader Fenster (Standalone-Version).
+Prospekt-Downloader Fenster.
 
-Lädt Verkaufsprospekte für ISINs aus der konfigurierten results.db herunter.
+Lädt Verkaufsprospekte für ISINs aus der Ergebnisdatenbank herunter.
+Öffnet sich als Toplevel aus app.py; kann auch standalone genutzt werden.
 """
 
 import os
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import results_store_ext as results_store
 from prospekt_worker import ProspektEvent, ProspektWorker
 
+# ─── Farben (identisch zu app.py) ────────────────────────────────────────────
 BG_MAIN         = "#1e1e2e"
 BG_PANEL        = "#2a2a3e"
 BG_INPUT        = "#313145"
@@ -29,13 +31,14 @@ ACCENT_LAVENDER = "#b4befe"
 BTN_BG          = "#45475a"
 BTN_ACTIVE      = "#585b70"
 
-_DEFAULT_PDF_FOLDER = Path(__file__).parent.parent / "data" / "prospekte"
+_PDF_FOLDER = Path(__file__).parent.parent / "data" / "prospekte"
 
 _COLS = [
-    ("isin",         "ISIN",           130),
-    ("fondsname",    "Fondsname",       220),
-    ("prospekt_pfad","Prospekt-Datei",  220),
-    ("prospekt_url", "Prospekt-URL",    200),
+    ("isin",          "ISIN",           130),
+    ("subfonds_name", "Unterfonds",     220),
+    ("anteilsklasse", "Anteilsklasse",  150),
+    ("prospekt_pfad", "Prospekt-Datei", 200),
+    ("prospekt_url",  "Prospekt-URL",   180),
 ]
 
 
@@ -48,7 +51,7 @@ class DownloadWindow(tk.Toplevel):
         self.geometry("900x650")
         self.minsize(700, 500)
 
-        self._pdf_folder = pdf_folder or _DEFAULT_PDF_FOLDER
+        self._pdf_folder = pdf_folder or _PDF_FOLDER
         self._worker: ProspektWorker | None = None
         self._event_queue: queue.Queue = queue.Queue()
         self._all_rows: list[dict] = []
@@ -57,7 +60,10 @@ class DownloadWindow(tk.Toplevel):
         self._refresh_table()
         self._poll_queue()
 
+    # ─── UI aufbauen ──────────────────────────────────────────────────────────
+
     def _build_ui(self):
+        # Toolbar
         toolbar = tk.Frame(self, bg=BG_PANEL)
         toolbar.pack(fill="x")
         inner = tk.Frame(toolbar, bg=BG_PANEL)
@@ -87,8 +93,9 @@ class DownloadWindow(tk.Toplevel):
         )
         self.btn_batch.pack(side="right", padx=(4, 0))
 
+        # Einzel-Download-Zeile
         single_frame = tk.Frame(self, bg=BG_PANEL)
-        single_frame.pack(fill="x")
+        single_frame.pack(fill="x", padx=0)
         single_inner = tk.Frame(single_frame, bg=BG_PANEL)
         single_inner.pack(fill="x", padx=12, pady=(0, 8))
 
@@ -115,6 +122,7 @@ class DownloadWindow(tk.Toplevel):
 
         ttk.Separator(self, orient="horizontal").pack(fill="x")
 
+        # Fortschrittszeile
         prog_frame = tk.Frame(self, bg=BG_MAIN)
         prog_frame.pack(fill="x", padx=12, pady=(6, 4))
 
@@ -139,6 +147,7 @@ class DownloadWindow(tk.Toplevel):
         )
         self._refresh_btn.pack(side="right")
 
+        # Treeview
         tree_frame = tk.Frame(self, bg=BG_MAIN)
         tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 6))
 
@@ -175,6 +184,7 @@ class DownloadWindow(tk.Toplevel):
         self._tree.tag_configure("ok",      background="#1a2e1a", foreground=ACCENT_GREEN)
         self._tree.tag_configure("missing", background=BG_PANEL,  foreground=FG_MUTED)
 
+        # Log-Bereich
         tk.Label(
             self, text="Log", bg=BG_MAIN, fg=FG_MUTED,
             font=("Segoe UI", 8), anchor="w"
@@ -187,12 +197,10 @@ class DownloadWindow(tk.Toplevel):
         )
         self._log.pack(fill="x", padx=12, pady=(0, 8))
 
+    # ─── Tabelle ──────────────────────────────────────────────────────────────
+
     def _refresh_table(self):
-        try:
-            self._all_rows = results_store.get_all_results()
-        except FileNotFoundError as e:
-            self._log_line(f"⚠ {e}")
-            return
+        self._all_rows = results_store.get_all_results()
         self._populate_tree(self._all_rows)
 
     def _populate_tree(self, rows: list[dict]):
@@ -201,11 +209,12 @@ class DownloadWindow(tk.Toplevel):
             pfad = row.get("prospekt_pfad", "") or ""
             url  = row.get("prospekt_url",  "") or ""
             exists = bool(pfad) and Path(pfad).exists()
-            display_pfad = ("✓ " + Path(pfad).name) if exists else ("— " + Path(pfad).name if pfad else "—")
+            display_pfad = ("✓ " + Path(pfad).name) if exists else "—"
             tag = "ok" if exists else "missing"
             self._tree.insert("", "end", iid=row["isin"], values=(
                 row.get("isin", ""),
-                row.get("fondsname", ""),
+                row.get("subfonds_name", "") or "—",
+                row.get("anteilsklasse", "") or "—",
                 display_pfad,
                 url or "—",
             ), tags=(tag,))
@@ -243,12 +252,10 @@ class DownloadWindow(tk.Toplevel):
             self.clipboard_append(url)
             self._log_line(f"URL kopiert: {url}")
 
+    # ─── Worker starten/stoppen ───────────────────────────────────────────────
+
     def _start_batch(self):
-        try:
-            queue_rows = results_store.get_prospekt_queue()
-        except FileNotFoundError as e:
-            messagebox.showerror("DB-Fehler", str(e), parent=self)
-            return
+        queue_rows = results_store.get_prospekt_queue()
         if not queue_rows:
             messagebox.showinfo("Keine ISINs", "Alle ISINs haben bereits ein Prospekt.", parent=self)
             return
@@ -287,6 +294,8 @@ class DownloadWindow(tk.Toplevel):
         self.btn_single.config(state=state_on)
         self.btn_stop.config(state=state_off)
 
+    # ─── Queue-Polling ────────────────────────────────────────────────────────
+
     def _poll_queue(self):
         try:
             while True:
@@ -301,15 +310,19 @@ class DownloadWindow(tk.Toplevel):
             self._log_line(f"[{evt.isin}] {evt.message}" if evt.isin else evt.message)
 
         elif evt.type in ("progress", "error"):
+            phase_label = f"P{evt.phase}"
             prefix = "✓" if evt.type == "progress" else "✗"
-            self._log_line(f"{prefix} [{evt.isin}] {evt.message}")
+            self._log_line(f"{prefix} [{phase_label}] [{evt.isin}] {evt.message}")
             if evt.total > 0:
                 pct = (evt.done + evt.skipped + evt.failed) / evt.total * 100
                 self._prog_var.set(pct)
+                phase_str = "Metadaten" if evt.phase == 1 else "Downloads"
                 self._status_var.set(
-                    f"{evt.done + evt.skipped + evt.failed} / {evt.total}  "
+                    f"Phase {evt.phase} {phase_str}: "
+                    f"{evt.done + evt.skipped + evt.failed}/{evt.total}  "
                     f"✓{evt.done}  ✗{evt.failed}  ⟳{evt.skipped}"
                 )
+            # Zeile im Treeview aktualisieren
             row = results_store.get_result(evt.isin)
             if row:
                 pfad = row.get("prospekt_pfad", "") or ""
@@ -319,7 +332,8 @@ class DownloadWindow(tk.Toplevel):
                 try:
                     self._tree.item(evt.isin, values=(
                         row.get("isin", ""),
-                        row.get("fondsname", ""),
+                        row.get("subfonds_name", "") or "—",
+                        row.get("anteilsklasse", "") or "—",
                         display_pfad,
                         url or "—",
                     ), tags=("ok" if exists else "missing",))

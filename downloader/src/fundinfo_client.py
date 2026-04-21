@@ -68,6 +68,14 @@ def _query_api(isin: str, profile: str, session: requests.Session) -> Optional[d
     Ruft die fundinfo.com JSON-API auf und gibt das rohe D-Dict zurück.
     D enthält alle verfügbaren Dokumenttypen als Keys (z.B. "PR", "KI", "WAI", ...).
     """
+    item = _query_api_full(isin, profile, session)
+    if item is None:
+        return None
+    return item.get("D", {})
+
+
+def _query_api_full(isin: str, profile: str, session: requests.Session) -> Optional[dict]:
+    """Wie _query_api, gibt aber das vollständige Data[0]-Objekt zurück (inkl. S, D, R)."""
     api_url = f"https://www.fundinfo.com/en/{profile}/LandingPage/Data"
     params = {"skip": 0, "query": isin, "orderdirection": "desc"}
     try:
@@ -77,7 +85,7 @@ def _query_api(isin: str, profile: str, session: requests.Session) -> Optional[d
         items = data.get("Data", [])
         if not items:
             return None
-        return items[0].get("D", {})
+        return items[0]
     except requests.RequestException as e:
         logger.debug(f"fundinfo API Fehler (Profil {profile}): {e}")
         return None
@@ -166,6 +174,99 @@ def _download_pdf(
             f.write(content)
 
         logger.info(f"PDF gespeichert: {filename} ({size_mb:.1f} MB)")
+        return str(save_path)
+
+    except requests.RequestException as e:
+        logger.error(f"Download-Fehler: {e}")
+        if save_path.exists():
+            save_path.unlink()
+        return None
+
+
+def fetch_fund_metadata(isin: str, delay: float = 1.0) -> Optional[dict]:
+    """
+    Ruft alle Stammdaten (S-Dict) + Prospekt-URL für eine ISIN ab.
+    Einmaliger API-Call pro ISIN — kein Download.
+
+    Returns dict mit Schlüsseln:
+        subfonds_id, subfonds_name, umbrella_id, anteilsklasse,
+        ausschuettungsart, fondswaehrung, fundinfo_ter,
+        prospekt_url, prospekt_lang, subfonds_code, profile
+    """
+    session = _get_session()
+    for profile in PROFILES:
+        time.sleep(delay)
+        item = _query_api_full(isin, profile, session)
+        if item is None:
+            continue
+        s = item.get("S") or {}
+        doc_info = _best_doc_from_list(item.get("D", {}).get("PR", []))
+        return {
+            "subfonds_id":       s.get("OFST900017", ""),
+            "subfonds_name":     s.get("OFST900016", ""),
+            "umbrella_id":       s.get("OFST900000", ""),
+            "anteilsklasse":     s.get("OFST020050", ""),
+            "ausschuettungsart": s.get("OFST020400", ""),
+            "fondswaehrung":     s.get("OFST010410", ""),
+            "fundinfo_ter":      s.get("OFST452000", ""),
+            "subfonds_code":     s.get("OFST900171", ""),
+            "prospekt_url":      doc_info["url"] if doc_info else "",
+            "prospekt_lang":     doc_info.get("language", "") if doc_info else "",
+            "profile":           profile,
+        }
+    return None
+
+
+def download_prospekt_from_url(
+    url: str,
+    subfonds_code: str,
+    language: str,
+    pdf_folder: str,
+    session: Optional[requests.Session] = None,
+) -> Optional[str]:
+    """
+    Lädt einen Prospekt von einer bekannten URL herunter.
+    Dateiname: {subfonds_code}_{language}.pdf  (z.B. FAFJA_EN.pdf)
+    Fallback:  {subfonds_code[:8]}_{language}.pdf wenn Code leer.
+    Idempotent: existiert die Datei bereits, wird sie direkt zurückgegeben.
+    """
+    from utils import sanitize_filename
+    folder = Path(pdf_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    code = sanitize_filename(subfonds_code) if subfonds_code else ""
+    lang = language.upper() if language else "XX"
+    filename = f"{code}_{lang}.pdf" if code else f"prospekt_{lang}.pdf"
+    save_path = folder / filename
+
+    if save_path.exists():
+        logger.info(f"Prospekt bereits vorhanden: {filename}")
+        return str(save_path)
+
+    if session is None:
+        session = _get_session()
+
+    try:
+        logger.info(f"Lade Prospekt: {url[:80]}")
+        resp = session.get(url, timeout=60, stream=True)
+        resp.raise_for_status()
+        chunks = []
+        for chunk in resp.iter_content(chunk_size=65536):
+            chunks.append(chunk)
+        content = b"".join(chunks)
+
+        if not content.startswith(b"%PDF") and b"%PDF" not in content[:1024]:
+            logger.warning(f"Heruntergeladene Datei ist keine PDF: {url[:80]}")
+            return None
+
+        size_mb = len(content) / (1024 * 1024)
+        if size_mb > 50:
+            logger.warning(f"PDF zu gross ({size_mb:.1f} MB): {filename}")
+            return None
+
+        with open(save_path, "wb") as f:
+            f.write(content)
+        logger.info(f"Prospekt gespeichert: {filename} ({size_mb:.1f} MB)")
         return str(save_path)
 
     except requests.RequestException as e:

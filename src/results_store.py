@@ -21,6 +21,8 @@ _COLUMNS = [
     "quelle", "modell", "pdf_datei", "ter",
     "analysiert_am", "erstellt_am", "ueberschrieben_am",
     "prospekt_pfad", "prospekt_url",
+    "subfonds_id", "subfonds_name", "umbrella_id",
+    "anteilsklasse", "ausschuettungsart", "fondswaehrung", "fundinfo_ter",
 ]
 
 
@@ -67,6 +69,13 @@ def init_db():
             "ter TEXT DEFAULT ''",
             "prospekt_pfad TEXT DEFAULT ''",
             "prospekt_url TEXT DEFAULT ''",
+            "subfonds_id TEXT DEFAULT ''",
+            "subfonds_name TEXT DEFAULT ''",
+            "umbrella_id TEXT DEFAULT ''",
+            "anteilsklasse TEXT DEFAULT ''",
+            "ausschuettungsart TEXT DEFAULT ''",
+            "fondswaehrung TEXT DEFAULT ''",
+            "fundinfo_ter TEXT DEFAULT ''",
         ]:
             try:
                 con.execute(f"ALTER TABLE fund_results ADD COLUMN {col_def}")
@@ -401,6 +410,55 @@ def get_result(isin: str) -> Optional[dict]:
             "SELECT * FROM fund_results WHERE isin = ?", (isin,)
         ).fetchone()
     return dict(row) if row else None
+
+
+def update_fundinfo_meta(
+    isin: str,
+    subfonds_id: str = "",
+    subfonds_name: str = "",
+    umbrella_id: str = "",
+    anteilsklasse: str = "",
+    ausschuettungsart: str = "",
+    fondswaehrung: str = "",
+    fundinfo_ter: str = "",
+    prospekt_url: str = "",
+):
+    """Speichert fundinfo-Metadaten für eine ISIN. Überschreibt nur leere Felder."""
+    if not isin:
+        return
+    with _connect() as con:
+        con.execute("""
+            UPDATE fund_results SET
+                subfonds_id       = CASE WHEN subfonds_id       = '' OR subfonds_id       IS NULL THEN ? ELSE subfonds_id       END,
+                subfonds_name     = CASE WHEN subfonds_name     = '' OR subfonds_name     IS NULL THEN ? ELSE subfonds_name     END,
+                umbrella_id       = CASE WHEN umbrella_id       = '' OR umbrella_id       IS NULL THEN ? ELSE umbrella_id       END,
+                anteilsklasse     = CASE WHEN anteilsklasse     = '' OR anteilsklasse     IS NULL THEN ? ELSE anteilsklasse     END,
+                ausschuettungsart = CASE WHEN ausschuettungsart = '' OR ausschuettungsart IS NULL THEN ? ELSE ausschuettungsart END,
+                fondswaehrung     = CASE WHEN fondswaehrung     = '' OR fondswaehrung     IS NULL THEN ? ELSE fondswaehrung     END,
+                fundinfo_ter      = CASE WHEN fundinfo_ter      = '' OR fundinfo_ter      IS NULL THEN ? ELSE fundinfo_ter      END,
+                prospekt_url      = CASE WHEN prospekt_url      = '' OR prospekt_url      IS NULL THEN ? ELSE prospekt_url      END
+            WHERE isin = ?
+        """, (
+            subfonds_id, subfonds_name, umbrella_id,
+            anteilsklasse, ausschuettungsart, fondswaehrung,
+            fundinfo_ter, prospekt_url,
+            isin,
+        ))
+
+
+def get_subfonds_groups() -> dict:
+    """
+    Gruppiert alle ISINs nach subfonds_id.
+    Gibt {subfonds_id: [row, ...]} zurück.
+    ISINs ohne subfonds_id landen unter dem Schlüssel ''.
+    """
+    init_db()
+    rows = get_all_results()
+    groups: dict[str, list] = {}
+    for row in rows:
+        key = row.get("subfonds_id") or ""
+        groups.setdefault(key, []).append(row)
+    return groups
 
 
 def get_prospekt_queue() -> list[dict]:
