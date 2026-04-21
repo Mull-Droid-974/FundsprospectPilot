@@ -175,6 +175,29 @@ def _download_pdf(
         return None
 
 
+def discover_prospectus_url(
+    isin: str,
+    delay: float = 1.5,
+) -> Optional[dict]:
+    """
+    Ermittelt die Prospekt-URL für eine ISIN ohne Download.
+
+    Returns:
+        {"url": str, "language": str, "profile": str} oder None.
+    """
+    session = _get_session()
+    for profile in PROFILES:
+        time.sleep(delay)
+        doc_info = _discover_pdf_url(isin, profile, session)
+        if doc_info and doc_info.get("url"):
+            return {
+                "url":      doc_info["url"],
+                "language": doc_info.get("language", ""),
+                "profile":  profile,
+            }
+    return None
+
+
 def fetch_prospectus(
     isin: str,
     fund_name: str,

@@ -370,6 +370,18 @@ def import_base_set(rows: list[dict]) -> tuple[int, int]:
 
 # ─── Prospekt-Download ───────────────────────────────────────────────────────
 
+def get_by_prospekt_url(url: str) -> Optional[dict]:
+    """Gibt den ersten DB-Eintrag zurück, der diese Prospekt-URL bereits hat."""
+    if not url:
+        return None
+    with _connect() as con:
+        row = con.execute(
+            "SELECT * FROM fund_results WHERE prospekt_url = ? AND prospekt_pfad != '' LIMIT 1",
+            (url,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def update_prospekt(isin: str, prospekt_pfad: str, prospekt_url: str):
     """Speichert lokalen Dateipfad und Original-URL eines heruntergeladenen Prospekts."""
     if not isin:

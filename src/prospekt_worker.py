@@ -81,13 +81,38 @@ class ProspektWorker(threading.Thread):
                 self._emit("log", isin, f"Übersprungen (bereits vorhanden): {Path(existing).name}")
                 continue
 
-            self._emit("log", isin, f"Lade Prospekt für {isin} ({fondsname}) …")
+            self._emit("log", isin, f"Suche Prospekt-URL für {isin} ({fondsname}) …")
 
+            try:
+                doc_info = fundinfo_client.discover_prospectus_url(isin, delay=self._delay)
+            except Exception as exc:
+                self._failed += 1
+                self._emit("error", isin, f"Fehler bei URL-Suche: {exc}")
+                continue
+
+            if not doc_info:
+                self._failed += 1
+                self._emit("error", isin, "Kein Prospekt gefunden (alle Profile versucht)")
+                continue
+
+            # Duplikat-Check: URL bereits von anderer ISIN heruntergeladen?
+            existing_row = results_store.get_by_prospekt_url(doc_info["url"])
+            if existing_row and Path(existing_row["prospekt_pfad"]).exists():
+                results_store.update_prospekt(isin, existing_row["prospekt_pfad"], doc_info["url"])
+                self._done += 1
+                self._emit(
+                    "progress", isin,
+                    f"Verknüpft (gleicher Prospekt wie {existing_row['isin']}): "
+                    f"{Path(existing_row['prospekt_pfad']).name}"
+                )
+                continue
+
+            # Neu herunterladen
             try:
                 result = fundinfo_client.fetch_prospectus(isin, fondsname, str(self._pdf_folder))
             except Exception as exc:
                 self._failed += 1
-                self._emit("error", isin, f"Fehler: {exc}")
+                self._emit("error", isin, f"Download-Fehler: {exc}")
                 continue
 
             if result and result.pdf_path:
@@ -96,7 +121,7 @@ class ProspektWorker(threading.Thread):
                 self._emit("progress", isin, f"Gespeichert: {Path(result.pdf_path).name}")
             else:
                 self._failed += 1
-                self._emit("error", isin, "Kein Prospekt gefunden (alle Profile versucht)")
+                self._emit("error", isin, "Download fehlgeschlagen")
 
             time.sleep(self._delay)
 
