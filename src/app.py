@@ -5,8 +5,10 @@ Hauptfenster mit Konfiguration, Batch-Analyse und Einzelne-PDF-Modus.
 
 import os
 import queue
+import re
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -46,6 +48,13 @@ class App(tk.Tk):
         self._processor = None
         self._progress_queue = queue.Queue()
         self._running = False
+        self._batch_results: list[dict] = []
+        self._batch_start_time: float | None = None
+        self._results_win = None       # ResultsWindow-Referenz (lazy open)
+        self._data_mgmt_win = None     # DataManagementWindow-Referenz (lazy open)
+        self._download_win = None      # DownloadWindow-Referenz (lazy open)
+        self._current_isin_var = tk.StringVar(value="—")
+        self._current_step_var = tk.StringVar(value="Bereit")
 
         self._build_ui()
         self._load_settings()
@@ -69,6 +78,38 @@ class App(tk.Tk):
             bg=BG_MAIN, fg=FG_MUTED,
             font=("Segoe UI", 10)
         ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            title_frame, text="📄  Prospekte",
+            command=self._open_download_window,
+            bg=BTN_BG, fg=ACCENT_YELLOW, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).pack(side="right", padx=(4, 0))
+
+        tk.Button(
+            title_frame, text="📋  Ergebnisse",
+            command=self._open_results,
+            bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).pack(side="right", padx=(4, 0))
+
+        tk.Button(
+            title_frame, text="🗃  Datenverwaltung",
+            command=self._open_data_management,
+            bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).pack(side="right", padx=(4, 0))
+
+        tk.Button(
+            title_frame, text="⚙  Admin",
+            command=self._open_admin,
+            bg=BTN_BG, fg=ACCENT_LAVENDER, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).pack(side="right")
 
         # Hauptbereich: Links Konfiguration, Rechts Log
         main_frame = tk.Frame(self, bg=BG_MAIN)
@@ -314,12 +355,28 @@ class App(tk.Tk):
         self.progress_bar = ttk.Progressbar(
             parent, variable=self.progress_var, maximum=100, mode="determinate"
         )
-        self.progress_bar.pack(fill="x", pady=(0, 8))
+        self.progress_bar.pack(fill="x", pady=(0, 4))
+
+        # Live-Status-Panel
+        live = tk.Frame(parent, bg=BG_PANEL, pady=4)
+        live.pack(fill="x", pady=(0, 6))
+
+        top_row = tk.Frame(live, bg=BG_PANEL)
+        top_row.pack(fill="x", padx=10, pady=(2, 0))
+        tk.Label(top_row, text="Aktuell:", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 8)).pack(side="left")
+        tk.Label(top_row, textvariable=self._current_isin_var, bg=BG_PANEL,
+                 fg=ACCENT_BLUE, font=("Segoe UI", 9, "bold")).pack(side="left", padx=(6, 0))
+
+        self._step_label = tk.Label(live, textvariable=self._current_step_var,
+                                    bg=BG_PANEL, fg=FG_MUTED,
+                                    font=("Segoe UI", 8), anchor="w")
+        self._step_label.pack(fill="x", padx=10, pady=(1, 3))
 
         self.progress_label = tk.Label(
-            parent, text="Bereit", bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 9)
+            parent, text="", bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8)
         )
-        self.progress_label.pack(anchor="w", pady=(0, 5))
+        self.progress_label.pack(anchor="w", pady=(0, 4))
 
         # Log-Textfeld
         self.log_text = scrolledtext.ScrolledText(
@@ -330,11 +387,14 @@ class App(tk.Tk):
         self.log_text.pack(fill="both", expand=True)
 
         # Log-Tags für Farben
-        self.log_text.tag_config("ok", foreground=ACCENT_GREEN)
-        self.log_text.tag_config("error", foreground=ACCENT_RED)
-        self.log_text.tag_config("warn", foreground=ACCENT_YELLOW)
-        self.log_text.tag_config("info", foreground=ACCENT_BLUE)
-        self.log_text.tag_config("muted", foreground=FG_MUTED)
+        self.log_text.tag_config("ok",     foreground=ACCENT_GREEN)
+        self.log_text.tag_config("error",  foreground=ACCENT_RED)
+        self.log_text.tag_config("warn",   foreground=ACCENT_YELLOW)
+        self.log_text.tag_config("info",   foreground=ACCENT_BLUE)
+        self.log_text.tag_config("muted",  foreground=FG_MUTED)
+        self.log_text.tag_config("rule",   foreground=ACCENT_LAVENDER)
+        self.log_text.tag_config("llm",    foreground="#cba6f7")   # lila
+        self.log_text.tag_config("detail", foreground="#6c7086")   # grau (Einrückungen)
 
         # Button-Leiste unter dem Log
         btn_row = tk.Frame(parent, bg=BG_MAIN)
@@ -407,12 +467,32 @@ class App(tk.Tk):
             self.var_single_pdf.set(path)
             # ISIN aus Dateiname ableiten (falls vorhanden)
             stem = Path(path).stem
-            import re
             isin_match = re.search(r'[A-Z]{2}[A-Z0-9]{10}', stem)
             if isin_match and not self.var_single_isin.get():
                 self.var_single_isin.set(isin_match.group())
 
     # ─── Log-Funktionen ───────────────────────────────────────────
+
+    def _log_tag(self, msg: str) -> str:
+        """Wählt den passenden Farb-Tag anhand der Nachrichteninhalts."""
+        if "❌" in msg:
+            return "error"
+        if "✅ Regelbasiert" in msg or "✅ PDF" in msg:
+            return "ok"
+        if "✅" in msg:
+            return "ok"
+        if "📐" in msg or "Regelextraktor" in msg or "Fondstyp:" in msg \
+                or "Anlegertyp:" in msg or "Kundentyp:" in msg \
+                or "Segmentierung:" in msg or "Begründung:" in msg \
+                or "Regelbasiert →" in msg:
+            return "rule"
+        if "🤖" in msg or "LLM" in msg:
+            return "llm"
+        if "⤵" in msg or "✂" in msg:
+            return "warn"
+        if msg.startswith("     ") or msg.strip().startswith("Begründung"):
+            return "detail"
+        return ""
 
     def _log(self, message: str, tag: str = ""):
         self.log_text.config(state="normal")
@@ -444,6 +524,10 @@ class App(tk.Tk):
 
         self._save_settings()
         self._running = True
+        self._batch_results = []
+        self._batch_start_time = time.time()
+        self._current_isin_var.set("—")
+        self._current_step_var.set("Starte...")
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.progress_var.set(0)
@@ -495,15 +579,47 @@ class App(tk.Tk):
         self._log(f"🔍 Analysiere: {Path(pdf_path).name}", "info")
         self.status_var.set(f"Analysiere {Path(pdf_path).name}...")
 
+        # ── Pipeline-Fenster öffnen ───────────────────────────────
+        from analysis_workflow import AnalysisWorkflowWindow
+        workflow = AnalysisWorkflowWindow(
+            self,
+            pdf_name=Path(pdf_path).name,
+            isin=isin,
+            fund_name=fund_name,
+        )
+
         # In Hintergrund-Thread
         def run():
             try:
                 from main import process_single_pdf
-                result = process_single_pdf(pdf_path, isin=isin, fund_name=fund_name, api_key=api_key)
+
+                # Kombinierter Callback: bestehender Log + Pipeline-Fenster
+                def cb(msg: str):
+                    tag = self._log_tag(msg)
+                    self.after(0, lambda m=msg, t=tag: self._log(m, t))
+                    if workflow.winfo_exists():
+                        self.after(0, lambda m=msg: workflow.handle_message(m))
+
+                result = process_single_pdf(
+                    pdf_path, isin=isin, fund_name=fund_name,
+                    api_key=api_key, log_callback=cb
+                )
                 self.after(0, lambda: self._show_single_result(result))
+                if workflow.winfo_exists():
+                    self.after(0, lambda: workflow.show_result(result))
+                # Ergebnis dauerhaft speichern
+                self.after(0, lambda: self._store_result(
+                    isin=isin,
+                    fondsname=fund_name,
+                    result=result,
+                    pdf_datei=Path(pdf_path).name,
+                ))
             except Exception as e:
-                self.after(0, lambda: self._log(f"❌ Fehler: {e}", "error"))
-                self.after(0, lambda: self.status_var.set(f"Fehler: {str(e)[:60]}"))
+                err_msg = str(e)
+                self.after(0, lambda m=err_msg: self._log(f"❌ Fehler: {m}", "error"))
+                self.after(0, lambda m=err_msg: self.status_var.set(f"Fehler: {m[:60]}"))
+                if workflow.winfo_exists():
+                    self.after(0, lambda m=err_msg: workflow.handle_message(f"❌ Fehler: {m}"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -577,34 +693,70 @@ class App(tk.Tk):
                 event = self._progress_queue.get_nowait()
 
                 if event.type == "log":
-                    tag = "error" if "❌" in event.message else ("ok" if "✅" in event.message else "")
+                    tag = self._log_tag(event.message)
                     self._log(event.message, tag)
+                    # Schritt-Text aus Log-Nachricht ableiten
+                    msg = event.message.strip()
+                    if "📥" in msg:
+                        self._current_step_var.set("📥 PDF wird heruntergeladen...")
+                    elif "✅ PDF:" in msg:
+                        self._current_step_var.set("📄 " + msg.lstrip("✅ "))
+                    elif "🔍" in msg and "Web" in msg:
+                        self._current_step_var.set("🔍 Web-Suche läuft...")
+                    elif "📐" in msg:
+                        self._current_step_var.set("📐 Regelextraktor läuft...")
+                    elif "🤖 LLM-Aufruf" in msg:
+                        self._current_step_var.set(msg.strip())
+                    elif "🤖 LLM-Ergebnis" in msg:
+                        self._current_step_var.set(msg.strip())
+                    elif "❌ Konnte" in msg:
+                        self._current_step_var.set("❌ Klassifizierung fehlgeschlagen")
 
                 elif event.type == "progress":
                     if event.total > 0:
                         pct = (event.current / event.total) * 100
                         self.progress_var.set(pct)
                     self.progress_label.config(
-                        text=f"{event.current}/{event.total} — {event.isin}"
+                        text=f"{event.current} / {event.total} ISINs"
                     )
+                    self._current_isin_var.set(event.isin)
+                    self._current_step_var.set("🔄 Verarbeitung startet...")
                     self.status_var.set(event.message[:80])
 
                 elif event.type == "result":
                     seg = event.result.get("segmentierung", "")
                     tag = "ok" if seg in ("institutional", "retail") else "warn"
                     self._log(event.message, tag)
+                    self._batch_results.append(event.result)
+                    # Ergebnis dauerhaft speichern
+                    self._store_result(
+                        isin=event.isin,
+                        fondsname=event.result.get("_fund_name", ""),
+                        result=event.result,
+                        pdf_datei=event.result.get("_pdf_datei", ""),
+                    )
+                    # Schritt: Klassifizierung abgeschlossen
+                    label = {"institutional": "INSTITUTIONAL", "retail": "RETAIL"}.get(seg, "UNKLAR")
+                    conf = event.result.get("konfidenz", "")
+                    src = event.result.get("_source", "llm")
+                    src_label = "Regelbasiert" if src == "rules" else "LLM"
+                    self._current_step_var.set(f"✅ {label} | {conf} | {src_label}")
 
                 elif event.type == "done":
                     self._log(f"\n🎉 {event.message}", "ok")
                     self.progress_var.set(100)
+                    self._current_isin_var.set("—")
+                    self._current_step_var.set("Abgeschlossen")
                     self.status_var.set(event.message)
                     self._running = False
                     self.btn_start.config(state="normal")
                     self.btn_stop.config(state="disabled")
+                    self.after(300, self._show_summary)
 
                 elif event.type == "error":
                     self._log(f"❌ {event.message}", "error")
                     self.status_var.set(f"Fehler: {event.message[:60]}")
+                    self._current_step_var.set(f"❌ {event.message[:60]}")
                     self._running = False
                     self.btn_start.config(state="normal")
                     self.btn_stop.config(state="disabled")
@@ -614,7 +766,135 @@ class App(tk.Tk):
 
         self.after(200, self._poll_queue)
 
+    # ─── Batch-Zusammenfassung ────────────────────────────────────
+
+    def _show_summary(self):
+        results = self._batch_results
+        if not results:
+            return
+
+        elapsed = int(time.time() - (self._batch_start_time or time.time()))
+        mins, secs = divmod(elapsed, 60)
+
+        total = len(results)
+        retail = sum(1 for r in results if r.get("segmentierung") == "retail")
+        institutional = sum(1 for r in results if r.get("segmentierung") == "institutional")
+        unklar = sum(1 for r in results if r.get("segmentierung") == "unklar")
+        fehler = sum(1 for r in results if r.get("segmentierung") in ("fehler", "error", ""))
+        rules_count = sum(1 for r in results if r.get("_source") == "rules")
+        llm_count = total - rules_count
+
+        win = tk.Toplevel(self)
+        win.title("Batch-Zusammenfassung")
+        win.configure(bg=BG_MAIN)
+        win.geometry("460x420")
+        win.resizable(False, False)
+        win.grab_set()
+
+        # Titel
+        tk.Label(win, text="Batch-Analyse abgeschlossen",
+                 bg=BG_MAIN, fg=ACCENT_LAVENDER,
+                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 4))
+
+        tk.Label(win, text=f"Laufzeit: {mins}m {secs:02d}s  |  {total} ISINs verarbeitet",
+                 bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 9)).pack(pady=(0, 12))
+
+        def section(parent, title):
+            tk.Label(parent, text=title, bg=BG_MAIN, fg=ACCENT_BLUE,
+                     font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x", padx=24, pady=(8, 2))
+            ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=24)
+
+        def bar_row(parent, label, count, color):
+            if total == 0:
+                return
+            pct = count / total
+            bar_len = 24
+            filled = round(pct * bar_len)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            row = tk.Frame(parent, bg=BG_MAIN)
+            row.pack(fill="x", padx=24, pady=2)
+            tk.Label(row, text=f"{label:<16}", bg=BG_MAIN, fg=FG_MUTED,
+                     font=("Consolas", 9), width=16, anchor="w").pack(side="left")
+            tk.Label(row, text=bar, bg=BG_MAIN, fg=color,
+                     font=("Consolas", 9)).pack(side="left")
+            tk.Label(row, text=f"  {count:>3}  ({pct:.0%})",
+                     bg=BG_MAIN, fg=FG_TEXT, font=("Consolas", 9)).pack(side="left")
+
+        section(win, "Segmentierung")
+        bar_row(win, "Retail", retail, ACCENT_GREEN)
+        bar_row(win, "Institutional", institutional, ACCENT_BLUE)
+        bar_row(win, "Unklar", unklar, ACCENT_YELLOW)
+        if fehler:
+            bar_row(win, "Fehler", fehler, ACCENT_RED)
+
+        section(win, "Verarbeitungsmethode")
+        bar_row(win, "Regelbasiert", rules_count, ACCENT_GREEN)
+        bar_row(win, "LLM-Fallback", llm_count, ACCENT_YELLOW)
+
+        if rules_count > 0:
+            token_saved = rules_count * 8000
+            tk.Label(win,
+                     text=f"~{token_saved:,} Zeichen eingespart (kein LLM für {rules_count} ISINs)",
+                     bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8)).pack(pady=(6, 0))
+
+        tk.Button(
+            win, text="  OK  ", command=win.destroy,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 10), padx=20, pady=6, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).pack(pady=18)
+
+    # ─── Ergebnis-Datenbank ───────────────────────────────────────
+
+    def _store_result(self, isin: str, fondsname: str, result: dict, pdf_datei: str = ""):
+        """Speichert ein Ergebnis in der SQLite-DB und aktualisiert offene Fenster."""
+        try:
+            import results_store
+            results_store.upsert_result(isin, fondsname, result, pdf_datei)
+        except Exception:
+            pass
+        # Offenes Ergebnis-Fenster sofort aktualisieren
+        try:
+            if self._results_win and self._results_win.winfo_exists():
+                self._results_win.refresh()
+        except Exception:
+            pass
+        # Datenverwaltungs-Ergebnis-Tab live aktualisieren
+        try:
+            if self._data_mgmt_win and self._data_mgmt_win.winfo_exists():
+                self._data_mgmt_win.refresh_results()
+        except Exception:
+            pass
+
+    def _open_results(self):
+        from results_window import ResultsWindow
+        if self._results_win and self._results_win.winfo_exists():
+            self._results_win.lift()
+            self._results_win.focus_force()
+        else:
+            self._results_win = ResultsWindow(self)
+
+    def _open_data_management(self):
+        from data_management_window import DataManagementWindow
+        if self._data_mgmt_win and self._data_mgmt_win.winfo_exists():
+            self._data_mgmt_win.lift()
+            self._data_mgmt_win.focus_force()
+        else:
+            self._data_mgmt_win = DataManagementWindow(self)
+
+    def _open_download_window(self):
+        from download_window import DownloadWindow
+        if self._download_win and self._download_win.winfo_exists():
+            self._download_win.lift()
+            self._download_win.focus_force()
+        else:
+            self._download_win = DownloadWindow(self)
+
     # ─── Sonstiges ────────────────────────────────────────────────
+
+    def _open_admin(self):
+        from admin_panel import AdminPanel
+        AdminPanel(self)
 
     def _open_excel(self):
         excel_path = self.var_excel.get().strip()
