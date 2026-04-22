@@ -67,6 +67,7 @@ def process_single_pdf(
     isin: str = "",
     fund_name: str = "",
     api_key: str = "",
+    log_callback=None,
 ) -> dict:
     """
     Analysiert eine einzelne PDF-Datei (für den GUI-Prototyp-Modus).
@@ -76,7 +77,12 @@ def process_single_pdf(
     """
     api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
 
-    logger.info(f"Analysiere PDF: {pdf_path}")
+    def _log(msg: str):
+        logger.info(msg)
+        if log_callback:
+            log_callback(msg)
+
+    _log(f"Analysiere PDF: {pdf_path}")
     text = extract_relevant_text(pdf_path)
 
     if not text:

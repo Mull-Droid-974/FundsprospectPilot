@@ -53,6 +53,7 @@ class App(tk.Tk):
         self._results_win = None       # ResultsWindow-Referenz (lazy open)
         self._data_mgmt_win = None     # DataManagementWindow-Referenz (lazy open)
         self._download_win = None      # DownloadWindow-Referenz (lazy open)
+        self._analysis_win = None      # ProspektAnalysisWindow-Referenz (lazy open)
         self._current_isin_var = tk.StringVar(value="—")
         self._current_step_var = tk.StringVar(value="Bereit")
 
@@ -78,6 +79,14 @@ class App(tk.Tk):
             bg=BG_MAIN, fg=FG_MUTED,
             font=("Segoe UI", 10)
         ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            title_frame, text="🔬  Analyse",
+            command=self._open_analysis_window,
+            bg=BTN_BG, fg=ACCENT_LAVENDER, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        ).pack(side="right", padx=(4, 0))
 
         tk.Button(
             title_frame, text="📄  Prospekte",
@@ -889,6 +898,14 @@ class App(tk.Tk):
             self._download_win.focus_force()
         else:
             self._download_win = DownloadWindow(self)
+
+    def _open_analysis_window(self):
+        from prospekt_analysis_window import ProspektAnalysisWindow
+        if self._analysis_win and self._analysis_win.winfo_exists():
+            self._analysis_win.lift()
+            self._analysis_win.focus_force()
+        else:
+            self._analysis_win = ProspektAnalysisWindow(self)
 
     # ─── Sonstiges ────────────────────────────────────────────────
 

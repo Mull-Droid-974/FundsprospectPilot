@@ -93,17 +93,26 @@ class ProspektWorker(threading.Thread):
                 continue
 
             if meta:
-                results_store.update_fundinfo_meta(
-                    isin,
-                    subfonds_id=meta["subfonds_id"],
-                    subfonds_name=meta["subfonds_name"],
-                    umbrella_id=meta["umbrella_id"],
-                    anteilsklasse=meta["anteilsklasse"],
-                    ausschuettungsart=meta["ausschuettungsart"],
-                    fondswaehrung=meta["fondswaehrung"],
-                    fundinfo_ter=meta["fundinfo_ter"],
-                    prospekt_url=meta["prospekt_url"],
-                )
+                try:
+                    results_store.update_fundinfo_meta(
+                        isin,
+                        subfonds_id=meta["subfonds_id"],
+                        subfonds_name=meta["subfonds_name"],
+                        umbrella_id=meta["umbrella_id"],
+                        anteilsklasse=meta["anteilsklasse"],
+                        ausschuettungsart=meta["ausschuettungsart"],
+                        fondswaehrung=meta["fondswaehrung"],
+                        fundinfo_ter=meta["fundinfo_ter"],
+                        prospekt_url=meta["prospekt_url"],
+                        fundinfo_investor_type=meta.get("fundinfo_investor_type", ""),
+                        ongoing_charges_datum=meta.get("ongoing_charges_datum", ""),
+                        qualif_anleger_ch=meta.get("qualif_anleger_ch", ""),
+                        institutional_ch=meta.get("institutional_ch", ""),
+                    )
+                except Exception as exc:
+                    self._emit("error", isin, f"DB-Fehler Phase 1: {exc}", total=total)
+                    self._failed += 1
+                    continue
                 self._done += 1
                 self._emit("progress", isin,
                     f"Unterfonds: {meta['subfonds_name'] or '—'}", total=total)
@@ -248,24 +257,28 @@ class ProspektWorker(threading.Thread):
     # ─── Hauptlauf ───────────────────────────────────────────────────────────
 
     def run(self):
-        self._pdf_folder.mkdir(parents=True, exist_ok=True)
-        target_isins = {r["isin"] for r in self._isins}
+        try:
+            self._pdf_folder.mkdir(parents=True, exist_ok=True)
+            target_isins = {r["isin"] for r in self._isins}
 
-        # Phase 1: ISINs ohne subfonds_id mit Metadaten befüllen
-        without_meta = [r for r in self._isins if not r.get("subfonds_id")]
-        if without_meta:
-            self._load_metadata(without_meta)
-            if self._stop_flag:
-                self._emit("done", message="Abgebrochen nach Phase 1.")
-                return
-            # Frische Daten aus DB für Phase 2
-            self._isins = [
-                results_store.get_result(r["isin"]) or r for r in self._isins
-            ]
+            # Phase 1: ISINs ohne subfonds_id mit Metadaten befüllen
+            without_meta = [r for r in self._isins if not r.get("subfonds_id")]
+            if without_meta:
+                self._load_metadata(without_meta)
+                if self._stop_flag:
+                    self._emit("done", message="Abgebrochen nach Phase 1.")
+                    return
+                # Frische Daten aus DB für Phase 2
+                self._isins = [
+                    results_store.get_result(r["isin"]) or r for r in self._isins
+                ]
 
-        # Phase 2: Gruppierter Download
-        self._download_groups(target_isins)
+            # Phase 2: Gruppierter Download
+            self._download_groups(target_isins)
 
-        self._emit("done", message=(
-            f"Fertig. Neu: {self._done}, Übersprungen: {self._skipped}, Fehler: {self._failed}"
-        ))
+            self._emit("done", message=(
+                f"Fertig. Neu: {self._done}, Übersprungen: {self._skipped}, Fehler: {self._failed}"
+            ))
+        except Exception as exc:
+            self._emit("error", message=f"Worker-Fehler: {exc}")
+            self._emit("done", message=f"Abgebrochen durch unerwarteten Fehler: {exc}")

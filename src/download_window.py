@@ -93,6 +93,15 @@ class DownloadWindow(tk.Toplevel):
         )
         self.btn_batch.pack(side="right", padx=(4, 0))
 
+        self.btn_phase2 = tk.Button(
+            inner, text="⬇  Nur PDFs (Phase 2)",
+            command=self._start_phase2_only,
+            bg="#1a1e2e", fg=ACCENT_BLUE, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        )
+        self.btn_phase2.pack(side="right", padx=(4, 0))
+
         # Einzel-Download-Zeile
         single_frame = tk.Frame(self, bg=BG_PANEL)
         single_frame.pack(fill="x", padx=0)
@@ -261,6 +270,18 @@ class DownloadWindow(tk.Toplevel):
             return
         self._start_worker(queue_rows)
 
+    def _start_phase2_only(self):
+        rows = [r for r in results_store.get_prospekt_queue() if r.get("subfonds_id")]
+        if not rows:
+            messagebox.showinfo(
+                "Keine ISINs",
+                "Keine ISINs mit geladenen Metadaten gefunden.\n"
+                "Bitte zuerst den vollen Batch starten, damit Phase 1 (Metadaten) läuft.",
+                parent=self,
+            )
+            return
+        self._start_worker(rows)
+
     def _start_single(self):
         isin = self._isin_var.get().strip().upper()
         if not isin:
@@ -270,13 +291,15 @@ class DownloadWindow(tk.Toplevel):
         if not row:
             messagebox.showwarning("Nicht gefunden", f"ISIN {isin} ist nicht in der Datenbank.", parent=self)
             return
-        self._start_worker([row])
+        self._start_worker([row], single_mode=True)
 
-    def _start_worker(self, rows: list[dict]):
+    def _start_worker(self, rows: list[dict], single_mode: bool = False):
         if self._worker and self._worker.is_alive():
             return
         self._event_queue = queue.Queue()
-        self._worker = ProspektWorker(rows, self._pdf_folder, self._event_queue)
+        self._worker = ProspektWorker(
+            rows, self._pdf_folder, self._event_queue, single_mode=single_mode
+        )
         self._worker.start()
         self._set_running(True)
         self._status_var.set(f"0 / {len(rows)}")
@@ -291,6 +314,7 @@ class DownloadWindow(tk.Toplevel):
         state_on  = "disabled" if running else "normal"
         state_off = "normal"   if running else "disabled"
         self.btn_batch.config(state=state_on)
+        self.btn_phase2.config(state=state_on)
         self.btn_single.config(state=state_on)
         self.btn_stop.config(state=state_off)
 

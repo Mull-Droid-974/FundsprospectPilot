@@ -23,6 +23,10 @@ _COLUMNS = [
     "prospekt_pfad", "prospekt_url",
     "subfonds_id", "subfonds_name", "umbrella_id",
     "anteilsklasse", "ausschuettungsart", "fondswaehrung", "fundinfo_ter",
+    "fundinfo_investor_type", "ongoing_charges_datum",
+    "qualif_anleger_ch", "institutional_ch",
+    "llm_segmentierung", "llm_segmentierung_begruendung",
+    "fondstyp_roh", "anlegertyp_roh", "kundentyp_roh",
 ]
 
 
@@ -76,6 +80,15 @@ def init_db():
             "ausschuettungsart TEXT DEFAULT ''",
             "fondswaehrung TEXT DEFAULT ''",
             "fundinfo_ter TEXT DEFAULT ''",
+            "fundinfo_investor_type TEXT DEFAULT ''",
+            "ongoing_charges_datum TEXT DEFAULT ''",
+            "qualif_anleger_ch TEXT DEFAULT ''",
+            "institutional_ch TEXT DEFAULT ''",
+            "llm_segmentierung TEXT DEFAULT ''",
+            "llm_segmentierung_begruendung TEXT DEFAULT ''",
+            "fondstyp_roh TEXT DEFAULT ''",
+            "anlegertyp_roh TEXT DEFAULT ''",
+            "kundentyp_roh TEXT DEFAULT ''",
         ]:
             try:
                 con.execute(f"ALTER TABLE fund_results ADD COLUMN {col_def}")
@@ -422,6 +435,10 @@ def update_fundinfo_meta(
     fondswaehrung: str = "",
     fundinfo_ter: str = "",
     prospekt_url: str = "",
+    fundinfo_investor_type: str = "",
+    ongoing_charges_datum: str = "",
+    qualif_anleger_ch: str = "",
+    institutional_ch: str = "",
 ):
     """Speichert fundinfo-Metadaten für eine ISIN. Überschreibt nur leere Felder."""
     if not isin:
@@ -429,19 +446,24 @@ def update_fundinfo_meta(
     with _connect() as con:
         con.execute("""
             UPDATE fund_results SET
-                subfonds_id       = CASE WHEN subfonds_id       = '' OR subfonds_id       IS NULL THEN ? ELSE subfonds_id       END,
-                subfonds_name     = CASE WHEN subfonds_name     = '' OR subfonds_name     IS NULL THEN ? ELSE subfonds_name     END,
-                umbrella_id       = CASE WHEN umbrella_id       = '' OR umbrella_id       IS NULL THEN ? ELSE umbrella_id       END,
-                anteilsklasse     = CASE WHEN anteilsklasse     = '' OR anteilsklasse     IS NULL THEN ? ELSE anteilsklasse     END,
-                ausschuettungsart = CASE WHEN ausschuettungsart = '' OR ausschuettungsart IS NULL THEN ? ELSE ausschuettungsart END,
-                fondswaehrung     = CASE WHEN fondswaehrung     = '' OR fondswaehrung     IS NULL THEN ? ELSE fondswaehrung     END,
-                fundinfo_ter      = CASE WHEN fundinfo_ter      = '' OR fundinfo_ter      IS NULL THEN ? ELSE fundinfo_ter      END,
-                prospekt_url      = CASE WHEN prospekt_url      = '' OR prospekt_url      IS NULL THEN ? ELSE prospekt_url      END
+                subfonds_id            = CASE WHEN subfonds_id            = '' OR subfonds_id            IS NULL THEN ? ELSE subfonds_id            END,
+                subfonds_name          = CASE WHEN subfonds_name          = '' OR subfonds_name          IS NULL THEN ? ELSE subfonds_name          END,
+                umbrella_id            = CASE WHEN umbrella_id            = '' OR umbrella_id            IS NULL THEN ? ELSE umbrella_id            END,
+                anteilsklasse          = CASE WHEN anteilsklasse          = '' OR anteilsklasse          IS NULL THEN ? ELSE anteilsklasse          END,
+                ausschuettungsart      = CASE WHEN ausschuettungsart      = '' OR ausschuettungsart      IS NULL THEN ? ELSE ausschuettungsart      END,
+                fondswaehrung          = CASE WHEN fondswaehrung          = '' OR fondswaehrung          IS NULL THEN ? ELSE fondswaehrung          END,
+                fundinfo_ter           = CASE WHEN fundinfo_ter           = '' OR fundinfo_ter           IS NULL THEN ? ELSE fundinfo_ter           END,
+                prospekt_url           = CASE WHEN prospekt_url           = '' OR prospekt_url           IS NULL THEN ? ELSE prospekt_url           END,
+                fundinfo_investor_type = CASE WHEN fundinfo_investor_type = '' OR fundinfo_investor_type IS NULL THEN ? ELSE fundinfo_investor_type END,
+                ongoing_charges_datum  = CASE WHEN ongoing_charges_datum  = '' OR ongoing_charges_datum  IS NULL THEN ? ELSE ongoing_charges_datum  END,
+                qualif_anleger_ch      = CASE WHEN qualif_anleger_ch      = '' OR qualif_anleger_ch      IS NULL THEN ? ELSE qualif_anleger_ch      END,
+                institutional_ch       = CASE WHEN institutional_ch       = '' OR institutional_ch       IS NULL THEN ? ELSE institutional_ch       END
             WHERE isin = ?
         """, (
             subfonds_id, subfonds_name, umbrella_id,
             anteilsklasse, ausschuettungsart, fondswaehrung,
-            fundinfo_ter, prospekt_url,
+            fundinfo_ter, prospekt_url, fundinfo_investor_type,
+            ongoing_charges_datum, qualif_anleger_ch, institutional_ch,
             isin,
         ))
 
@@ -472,6 +494,70 @@ def get_prospekt_queue() -> list[dict]:
         r for r in rows
         if not r.get("prospekt_pfad") or not Path(r["prospekt_pfad"]).exists()
     ]
+
+
+def update_llm_analysis(
+    isin: str,
+    fondstyp: str = "",
+    anlegertyp: str = "",
+    kundentyp: str = "",
+    llm_segmentierung: str = "",
+    llm_segmentierung_begruendung: str = "",
+    fondstyp_roh: str = "",
+    anlegertyp_roh: str = "",
+    kundentyp_roh: str = "",
+    modell: str = "",
+):
+    """Speichert LLM-Analyseergebnisse für eine ISIN. Überschreibt immer."""
+    if not isin:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with _connect() as con:
+        con.execute("""
+            UPDATE fund_results SET
+                fondstyp                      = ?,
+                anlegertyp                    = ?,
+                kundentyp                     = ?,
+                llm_segmentierung             = ?,
+                llm_segmentierung_begruendung = ?,
+                fondstyp_roh                  = ?,
+                anlegertyp_roh                = ?,
+                kundentyp_roh                 = ?,
+                modell                        = ?,
+                analysiert_am                 = ?
+            WHERE isin = ?
+        """, (
+            fondstyp or "", anlegertyp or "", kundentyp or "",
+            llm_segmentierung or "", llm_segmentierung_begruendung or "",
+            fondstyp_roh or "", anlegertyp_roh or "", kundentyp_roh or "",
+            modell or "", now, isin,
+        ))
+
+
+def get_analysis_queue() -> list[dict]:
+    """Gibt alle ISINs zurück mit gültigem Prospekt aber noch ohne LLM-Segmentierung."""
+    init_db()
+    rows = get_all_results()
+    return [
+        r for r in rows
+        if r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()
+        and not r.get("llm_segmentierung")
+    ]
+
+
+def get_umbrella_groups() -> dict:
+    """
+    Gruppiert alle ISINs nach umbrella_id.
+    Gibt {umbrella_id: [row, ...]} zurück.
+    ISINs ohne umbrella_id landen unter dem Schlüssel ''.
+    """
+    init_db()
+    rows = get_all_results()
+    groups: dict[str, list] = {}
+    for row in rows:
+        key = row.get("umbrella_id") or ""
+        groups.setdefault(key, []).append(row)
+    return groups
 
 
 # DB beim Import initialisieren

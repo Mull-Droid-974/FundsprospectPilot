@@ -41,7 +41,17 @@ _COLS = [
     ("anteilsklasse",    "Anteilsklasse",   150),
     ("ausschuettungsart","Ausschüttung",     90),
     ("fondswaehrung",    "Währung",          70),
-    ("fundinfo_ter",     "TER (API)",        80),
+    ("fundinfo_ter",           "TER (API)",        80),
+    ("fundinfo_investor_type", "Inv.Type (API)",    130),
+    ("umbrella_id",            "Umbrella-ID",       150),
+    ("ongoing_charges_datum",  "OC-Datum",           90),
+    ("qualif_anleger_ch",           "Qual.Anleger CH",    90),
+    ("institutional_ch",           "Institutional CH",   90),
+    ("llm_segmentierung",             "LLM-Segment.",      110),
+    ("llm_segmentierung_begruendung", "LLM-Begründung",    280),
+    ("fondstyp_roh",                  "Fondstyp (Roh)",    180),
+    ("anlegertyp_roh",                "Anlegertyp (Roh)",  180),
+    ("kundentyp_roh",                 "Kundentyp (Roh)",   180),
 ]
 _COL_KEYS = [c[0] for c in _COLS]
 
