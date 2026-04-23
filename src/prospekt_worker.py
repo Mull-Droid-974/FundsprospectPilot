@@ -119,6 +119,7 @@ class ProspektWorker(threading.Thread):
             else:
                 self._failed += 1
                 self._emit("error", isin, "Keine Daten von fundinfo", total=total)
+                results_store.mark_meta_not_found(isin)
 
     # ─── Phase 2: Gruppierter Download ───────────────────────────────────────
 
@@ -184,7 +185,8 @@ class ProspektWorker(threading.Thread):
             # B) URL aus DB oder neu ermitteln
             ref_row = group_rows[0]
             prospekt_url = next(
-                (r.get("prospekt_url", "") for r in group_rows if r.get("prospekt_url")),
+                (r.get("prospekt_url", "") for r in group_rows
+                 if r.get("prospekt_url") and not r["prospekt_url"].startswith("__")),
                 ""
             )
             if not prospekt_url:
@@ -204,6 +206,18 @@ class ProspektWorker(threading.Thread):
                 self._failed += 1
                 self._emit("error", isin=ref_row["isin"],
                            message="Kein Prospekt auf fundinfo gefunden", total=total_groups)
+                continue
+
+            # Prüfen ob diese URL bereits von einer anderen Gruppe vorliegt
+            cached = results_store.get_by_prospekt_url(prospekt_url)
+            if cached and cached.get("prospekt_pfad") and Path(cached["prospekt_pfad"]).exists():
+                cached_path = cached["prospekt_pfad"]
+                for r in group_rows:
+                    results_store.update_prospekt(r["isin"], cached_path, prospekt_url)
+                self._done += 1
+                self._emit("progress", isin=ref_row["isin"],
+                    message=f"Verknüpft aus Cache → {Path(cached_path).name}",
+                    total=total_groups)
                 continue
 
             # C) Download
@@ -259,9 +273,11 @@ class ProspektWorker(threading.Thread):
     def run(self):
         try:
             self._pdf_folder.mkdir(parents=True, exist_ok=True)
+            results_store.cleanup_sentinels()
             target_isins = {r["isin"] for r in self._isins}
 
             # Phase 1: ISINs ohne subfonds_id mit Metadaten befüllen
+            # ISINs mit Sentinel (__nf_*) haben nicht-leere subfonds_id → werden korrekt ausgeschlossen
             without_meta = [r for r in self._isins if not r.get("subfonds_id")]
             if without_meta:
                 self._load_metadata(without_meta)

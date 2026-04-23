@@ -28,36 +28,39 @@ EMPTY_RESULT = {
     "konfidenz": "niedrig",
 }
 
-SYSTEM_PROMPT = """Du bist ein Experte für Investmentfonds-Regulierung in der Schweiz und Europa.
-Deine Aufgabe ist es, aus Verkaufsprospekten (Fondsprospekten) die Zielgruppe der Anteilsklassen zu bestimmen.
+SYSTEM_PROMPT = """Du bist ein erfahrener Finanzrechtsexperte und Fondsanalyst mit tiefem Wissen in der \
+Investmentfonds-Regulierung der Schweiz und Europas.
 
-Analysiere den Text und extrahiere folgende Informationen:
+Analysiere den vorliegenden Verkaufsprospekt und gib folgende Felder als JSON zurück:
 
-1. **segmentierung**: Ist die Anteilsklasse für institutionelle oder Retail-Anleger?
-   - "institutional" = für professionelle/qualifizierte/institutionelle Anleger
-   - "retail" = für Privatanleger/alle Anleger
-   - "unklar" = kann nicht eindeutig bestimmt werden
+1. **segmentierung** — Deine eigene Experteneinschätzung: Für wen ist diese Anteilsklasse bestimmt?
+   Versuche primär zu beurteilen, ob es sich um eine Retail- oder institutionelle Klasse handelt.
+   Wenn du sicher bist: `"retail"` oder `"institutional"`.
+   Wenn der Sachverhalt differenzierter ist, wähle den Begriff der deiner fachlichen Einschätzung
+   am besten entspricht — du hast freie Hand.
 
-2. **fondstyp**: Art des Fonds (z.B. "UCITS", "AIF", "Hedgefonds", "Immobilienfonds", "ETF", "SICAV", etc.)
+2. **fondstyp** — Art des Fonds (z.B. "UCITS", "AIF", "Hedgefonds", "Immobilienfonds", "ETF", "SICAV")
 
-3. **anlegertyp**: Zulässige Anleger laut Prospekt (z.B. "Qualifizierte Anleger", "Professionelle Anleger",
-   "Alle Anleger", "Institutionelle Anleger", "Semi-professionelle Anleger")
+3. **anlegertyp** — Zulässige Anleger laut Prospekt (z.B. "Qualifizierte Anleger CH",
+   "Professionelle Anleger MiFID II", "Alle Anleger", "Institutionelle Anleger")
 
-4. **kundentyp**: MiFID II Klassifizierung (z.B. "MiFID Retail", "MiFID Professional",
+4. **kundentyp** — Regulatorische Klassifizierung (z.B. "MiFID Retail", "MiFID Professional",
    "Eligible Counterparty", "Geeignete Gegenpartei")
 
-5. **begruendung**: Kurze Begründung der Segmentierungsentscheidung (1-2 Sätze)
+5. **begruendung** — 1–3 prägnante Sätze: Welche konkrete Klausel, welcher Begriff oder
+   welche Einschränkung im Prospekt trägt deine Segmentierungsentscheidung?
+   Nenne das angewandte regulatorische Rahmenwerk explizit.
 
-6. **konfidenz**: Wie sicher bist du dir? ("hoch", "mittel", "niedrig")
+6. **konfidenz** — Wie sicher bist du? ("hoch", "mittel", "niedrig")
 
 Antworte AUSSCHLIESSLICH mit einem validen JSON-Objekt. Kein Text davor oder danach.
 Beispiel:
 {
   "segmentierung": "institutional",
-  "fondstyp": "UCITS",
-  "anlegertyp": "Professionelle Anleger",
+  "fondstyp": "AIF",
+  "anlegertyp": "Qualifizierte Anleger CH (KAG Art. 10 Abs. 3)",
   "kundentyp": "MiFID Professional",
-  "begruendung": "Der Prospekt schränkt den Vertrieb explizit auf professionelle Anleger gemäss MiFID II ein.",
+  "begruendung": "Der Prospekt schränkt den Vertrieb nach Art. 10 Abs. 3 KAG auf qualifizierte Anleger ein und untersagt den Vertrieb an Privatanleger ausdrücklich. Das FINMA-Rahmenwerk gilt, da der Fonds in der Schweiz domiziliert ist.",
   "konfidenz": "hoch"
 }"""
 
@@ -160,13 +163,13 @@ def _parse_result(text: str, isin: str = "") -> dict:
                 result[key] = default
 
         # Segmentierung normalisieren
-        seg = result.get("segmentierung", "unklar").lower().strip()
+        seg = result.get("segmentierung", "").lower().strip()
         if "institut" in seg:
             result["segmentierung"] = "institutional"
         elif "retail" in seg or "privat" in seg:
             result["segmentierung"] = "retail"
         else:
-            result["segmentierung"] = "unklar"
+            result["segmentierung"] = seg or "unklar"
 
         return result
 

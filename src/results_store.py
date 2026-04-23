@@ -392,6 +392,25 @@ def import_base_set(rows: list[dict]) -> tuple[int, int]:
 
 # ─── Prospekt-Download ───────────────────────────────────────────────────────
 
+def cleanup_sentinels():
+    """Bereinigt fehlerhafte Sentinel-Werte aus prospekt_url (z.B. '__not_found__')."""
+    with _connect() as con:
+        con.execute(
+            "UPDATE fund_results SET prospekt_url = '' WHERE prospekt_url LIKE '__%'"
+        )
+
+
+def mark_meta_not_found(isin: str):
+    """Setzt Sentinel-subfonds_id damit Phase 1 diese ISIN beim nächsten Start überspringt."""
+    if not isin:
+        return
+    with _connect() as con:
+        con.execute(
+            "UPDATE fund_results SET subfonds_id = ? WHERE isin = ? AND (subfonds_id = '' OR subfonds_id IS NULL)",
+            (f"__nf_{isin}", isin),
+        )
+
+
 def get_by_prospekt_url(url: str) -> Optional[dict]:
     """Gibt den ersten DB-Eintrag zurück, der diese Prospekt-URL bereits hat."""
     if not url:

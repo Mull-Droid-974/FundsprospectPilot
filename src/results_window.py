@@ -199,6 +199,8 @@ class ResultsWindow(tk.Toplevel):
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
+        self._tree.bind("<Double-1>", self._on_double_click)
+
         # Tags für Segmentierungsfarben
         for seg, (fg, bg) in _SEG_COLORS.items():
             self._tree.tag_configure(seg, foreground=fg, background=bg)
@@ -278,6 +280,124 @@ class ResultsWindow(tk.Toplevel):
             self._tree.heading(key, text=header + arrow)
 
     # ── Aktionen ───────────────────────────────────────────────────────────
+
+    def _on_double_click(self, event):
+        sel = self._tree.selection()
+        if not sel:
+            return
+        isin = sel[0]
+        row = next((r for r in self._all_rows if r.get("isin") == isin), None)
+        if row:
+            self._show_detail(row)
+
+    def _show_detail(self, row: dict):
+        win = tk.Toplevel(self)
+        win.title(f"Detail — {row.get('isin', '')}  {row.get('fondsname', '')}")
+        win.configure(bg=BG_MAIN)
+        win.geometry("680x640")
+        win.minsize(500, 400)
+
+        # Titel
+        tk.Label(
+            win,
+            text=f"{row.get('isin', '')}  —  {row.get('fondsname', '') or '—'}",
+            bg=BG_PANEL, fg=ACCENT_LAVENDER,
+            font=("Segoe UI", 11, "bold"),
+            anchor="w", padx=14, pady=8,
+        ).pack(fill="x")
+
+        # Scrollbarer Inhaltsbereich
+        canvas = tk.Canvas(win, bg=BG_MAIN, highlightthickness=0)
+        vsb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg=BG_MAIN)
+        canvas_win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_resize(e):
+            canvas.itemconfig(canvas_win, width=e.width)
+        canvas.bind("<Configure>", _on_resize)
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        inner.bind("<Configure>", _on_frame_configure)
+
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # Feldgruppen
+        _GROUPS = [
+            ("Identifikation", ["isin", "fondsname", "subfonds_name", "anteilsklasse",
+                                "ausschuettungsart", "fondswaehrung"]),
+            ("Analyse", ["segmentierung", "fondstyp", "anlegertyp", "kundentyp",
+                         "konfidenz", "analysiert_am"]),
+            ("Begründung", ["llm_segmentierung_begruendung"]),
+            ("Fundinfo API", ["fundinfo_ter", "fundinfo_investor_type", "umbrella_id",
+                              "ongoing_charges_datum", "qualif_anleger_ch", "institutional_ch"]),
+            ("Prospekt", ["prospekt_url", "prospekt_pfad"]),
+            ("Rohdaten LLM", ["llm_segmentierung", "fondstyp_roh", "anlegertyp_roh", "kundentyp_roh"]),
+        ]
+
+        _LABELS = {k: h for k, h, _ in _COLS}
+
+        for group_title, keys in _GROUPS:
+            # Gruppenheader
+            tk.Label(
+                inner, text=group_title,
+                bg=BG_MAIN, fg=ACCENT_BLUE,
+                font=("Segoe UI", 9, "bold"),
+                anchor="w", padx=14, pady=6,
+            ).pack(fill="x", pady=(10, 0))
+
+            sep = tk.Frame(inner, bg=FG_DIM, height=1)
+            sep.pack(fill="x", padx=14, pady=(0, 4))
+
+            for key in keys:
+                val = str(row.get(key) or "—")
+                label = _LABELS.get(key, key)
+                is_long = len(val) > 80 or "\n" in val
+
+                row_frame = tk.Frame(inner, bg=BG_PANEL)
+                row_frame.pack(fill="x", padx=14, pady=1)
+
+                tk.Label(
+                    row_frame, text=label,
+                    bg=BG_PANEL, fg=FG_MUTED,
+                    font=("Segoe UI", 8),
+                    width=22, anchor="nw",
+                ).pack(side="left", padx=(8, 4), pady=4)
+
+                if is_long:
+                    txt = tk.Text(
+                        row_frame, bg=BG_PANEL, fg=FG_TEXT,
+                        font=("Segoe UI", 9),
+                        relief="flat", wrap="word",
+                        height=min(6, val.count("\n") + len(val) // 60 + 1),
+                        bd=0,
+                    )
+                    txt.insert("1.0", val)
+                    txt.configure(state="disabled")
+                    txt.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=4)
+                else:
+                    tk.Label(
+                        row_frame, text=val,
+                        bg=BG_PANEL, fg=FG_TEXT,
+                        font=("Segoe UI", 9),
+                        anchor="nw", justify="left",
+                    ).pack(side="left", fill="x", expand=True, padx=(0, 8), pady=4)
+
+        # Schliessen-Button
+        tk.Button(
+            win, text="Schliessen",
+            command=win.destroy,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 9), padx=14, pady=5, cursor="hand2",
+            activebackground=BTN_ACTIVE,
+        ).pack(pady=(6, 10))
 
     def _delete_selected(self):
         sel = self._tree.selection()
