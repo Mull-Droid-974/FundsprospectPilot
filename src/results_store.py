@@ -27,6 +27,8 @@ _COLUMNS = [
     "qualif_anleger_ch", "institutional_ch",
     "llm_segmentierung", "llm_segmentierung_begruendung",
     "fondstyp_roh", "anlegertyp_roh", "kundentyp_roh",
+    "mindestanlage", "mindestanlage_roh",
+    "prospekt_nicht_gefunden",
 ]
 
 
@@ -34,8 +36,10 @@ _COLUMNS = [
 
 def _connect() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(_DB_PATH))
+    con = sqlite3.connect(str(_DB_PATH), timeout=30)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
@@ -89,6 +93,9 @@ def init_db():
             "fondstyp_roh TEXT DEFAULT ''",
             "anlegertyp_roh TEXT DEFAULT ''",
             "kundentyp_roh TEXT DEFAULT ''",
+            "mindestanlage TEXT DEFAULT ''",
+            "mindestanlage_roh TEXT DEFAULT ''",
+            "prospekt_nicht_gefunden TEXT DEFAULT ''",
         ]:
             try:
                 con.execute(f"ALTER TABLE fund_results ADD COLUMN {col_def}")
@@ -411,6 +418,18 @@ def mark_meta_not_found(isin: str):
         )
 
 
+def mark_prospekt_nicht_gefunden(isin: str):
+    """Markiert eine ISIN als 'Prospekt nicht gefunden' mit Zeitstempel."""
+    if not isin:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with _connect() as con:
+        con.execute(
+            "UPDATE fund_results SET prospekt_nicht_gefunden = ? WHERE isin = ?",
+            (now, isin),
+        )
+
+
 def get_by_prospekt_url(url: str) -> Optional[dict]:
     """Gibt den ersten DB-Eintrag zurück, der diese Prospekt-URL bereits hat."""
     if not url:
@@ -429,7 +448,7 @@ def update_prospekt(isin: str, prospekt_pfad: str, prospekt_url: str):
         return
     with _connect() as con:
         con.execute(
-            "UPDATE fund_results SET prospekt_pfad=?, prospekt_url=? WHERE isin=?",
+            "UPDATE fund_results SET prospekt_pfad=?, prospekt_url=?, prospekt_nicht_gefunden='' WHERE isin=?",
             (prospekt_pfad or "", prospekt_url or "", isin),
         )
 
@@ -502,17 +521,22 @@ def get_subfonds_groups() -> dict:
     return groups
 
 
-def get_prospekt_queue() -> list[dict]:
+def get_prospekt_queue(skip_nicht_gefunden: bool = False) -> list[dict]:
     """
     Gibt alle ISINs zurück, für die noch kein Prospekt vorliegt
     (prospekt_pfad leer ODER Datei nicht auf Disk vorhanden).
+    Mit skip_nicht_gefunden=True werden ISINs übersprungen, die bereits als
+    'nicht gefunden' markiert wurden.
     """
     init_db()
     rows = get_all_results()
-    return [
+    result = [
         r for r in rows
         if not r.get("prospekt_pfad") or not Path(r["prospekt_pfad"]).exists()
     ]
+    if skip_nicht_gefunden:
+        result = [r for r in result if not r.get("prospekt_nicht_gefunden")]
+    return result
 
 
 def update_llm_analysis(
@@ -525,6 +549,8 @@ def update_llm_analysis(
     fondstyp_roh: str = "",
     anlegertyp_roh: str = "",
     kundentyp_roh: str = "",
+    mindestanlage: str = "",
+    mindestanlage_roh: str = "",
     modell: str = "",
 ):
     """Speichert LLM-Analyseergebnisse für eine ISIN. Überschreibt immer."""
@@ -542,6 +568,8 @@ def update_llm_analysis(
                 fondstyp_roh                  = ?,
                 anlegertyp_roh                = ?,
                 kundentyp_roh                 = ?,
+                mindestanlage                 = ?,
+                mindestanlage_roh             = ?,
                 modell                        = ?,
                 analysiert_am                 = ?
             WHERE isin = ?
@@ -549,6 +577,7 @@ def update_llm_analysis(
             fondstyp or "", anlegertyp or "", kundentyp or "",
             llm_segmentierung or "", llm_segmentierung_begruendung or "",
             fondstyp_roh or "", anlegertyp_roh or "", kundentyp_roh or "",
+            mindestanlage or "", mindestanlage_roh or "",
             modell or "", now, isin,
         ))
 

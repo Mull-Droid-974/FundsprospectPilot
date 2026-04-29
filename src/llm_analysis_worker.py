@@ -17,9 +17,22 @@ sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(_
 
 import anthropic
 
+import pdf_analyzer
 import results_store
 from pdf_analyzer import extract_relevant_text
 from utils import logger
+
+
+def _format_tables_for_prompt(tables: list[dict]) -> str:
+    """Formatiert extrahierte PDF-Tabellen als lesbaren Kontext für den LLM-Prompt."""
+    lines = ["### ANTEILSKLASSEN-TABELLEN (strukturiert aus PDF):"]
+    for t in tables:
+        lines.append(f"\n--- Seite {t['page']} ---")
+        lines.append(" | ".join(t.get("headers", [])))
+        lines.append("-" * 40)
+        for row in t.get("rows", []):
+            lines.append(" | ".join(row))
+    return "\n".join(lines)
 
 
 @dataclass
@@ -110,13 +123,18 @@ class LLMAnalysisWorker(threading.Thread):
     def _call_llm(self, pdf_text: str, group_rows: list[dict]) -> dict | None:
         isin_list = self._build_isin_list(group_rows)
         prompt = self._prompt_template.replace("{isin_list}", isin_list)
-        user_msg = f"{prompt}\n\n### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}"
 
         client = anthropic.Anthropic(api_key=self._api_key)
         response = client.messages.create(
             model=self._model,
             max_tokens=2048,
-            messages=[{"role": "user", "content": user_msg}],
+            system=[{"type": "text", "text": prompt,
+                     "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": [
+                {"type": "text",
+                 "text": f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
+                 "cache_control": {"type": "ephemeral"}},
+            ]}],
         )
 
         raw = ""
@@ -181,6 +199,12 @@ class LLMAnalysisWorker(threading.Thread):
             begruendung = (
                 (klassen_entry.get("begruendung") or "") if klassen_entry else ""
             )
+            mindestanlage = (
+                (klassen_entry.get("mindestanlage") or "") if klassen_entry else ""
+            )
+            mindestanlage_roh = (
+                (klassen_entry.get("mindestanlage_roh") or "") if klassen_entry else ""
+            )
 
             results_store.update_llm_analysis(
                 isin=isin,
@@ -192,6 +216,8 @@ class LLMAnalysisWorker(threading.Thread):
                 fondstyp_roh=fondstyp_roh[:200],
                 anlegertyp_roh=anleger_roh[:200],
                 kundentyp_roh=kunden_roh[:200],
+                mindestanlage=mindestanlage[:100],
+                mindestanlage_roh=mindestanlage_roh[:200],
                 modell=model,
             )
 
@@ -235,6 +261,10 @@ class LLMAnalysisWorker(threading.Thread):
                     pdf_text = extract_relevant_text(pdf_path) or ""
                     if not pdf_text:
                         raise ValueError("Kein Text extrahierbar")
+                    # Strukturierte Tabellen voranstellen falls vorhanden
+                    tables = pdf_analyzer.load_tables_json(pdf_path)
+                    if tables:
+                        pdf_text = _format_tables_for_prompt(tables) + "\n\n" + pdf_text
                 except Exception as exc:
                     self._failed += 1
                     self._emit("error", isin=ref_isin,

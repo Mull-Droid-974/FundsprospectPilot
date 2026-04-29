@@ -91,6 +91,10 @@ KLASSIFIZIERUNGS-HINWEISE:
 - Prüfe explizit: Mindestzeichnung, "reserved for", "restricted to", TER-Höhe
 - CH-ISINs oft KAG Art.10 qualifiziert; LU/IE-ISINs oft UCITS retail
 
+MINDESTANLAGE (pro Anteilsklasse):
+- MINDESTANLAGE: Mindestzeichnungsbetrag exakt wie im Prospekt (Betrag + Währung, z.B. "10.000 CHF"). Nur für diese Anteilsklasse.
+- MINDESTANLAGE_ROH: Exakter Wortlaut aus dem Prospekt mit Seitenangabe, Format "S.<Nr>: <Text>"
+
 BEKANNTE ISINs IN DIESEM FONDS:
 {isin_list}
 
@@ -104,10 +108,12 @@ BEKANNTE ISINs IN DIESEM FONDS:
   "kundentyp_roh": "S.<Nr>: exakte Formulierung aus dem Prospekt vor dem Mapping",
   "anteilsklassen": [
     {
-      "isin":              "ISIN oder leer wenn nicht zuordenbar",
-      "anteilsklasse_name":"Klassenname aus dem Prospekt",
-      "segmentierung":     "retail|institutional|qualified|mixed|unklar",
-      "begruendung":       "max. 200 Zeichen — warum diese Kategorie"
+      "isin":               "ISIN oder leer wenn nicht zuordenbar",
+      "anteilsklasse_name": "Klassenname aus dem Prospekt",
+      "segmentierung":      "retail|institutional|qualified|mixed|unklar",
+      "begruendung":        "max. 200 Zeichen — warum diese Kategorie",
+      "mindestanlage":      "Betrag + Währung, z.B. '10.000 CHF' (leer wenn nicht gefunden)",
+      "mindestanlage_roh":  "S.<Nr>: exakter Wortlaut aus dem Prospekt"
     }
   ]
 }"""

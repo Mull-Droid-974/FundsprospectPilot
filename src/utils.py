@@ -1,4 +1,4 @@
-"""Hilfsfunktionen: Logging, PDF-Nummerierung, Pfadverwaltung."""
+"""Hilfsfunktionen: Logging, PDF-Nummerierung, Pfadverwaltung, API-Validierung."""
 
 import logging
 import os
@@ -111,3 +111,20 @@ def extract_relevant_sections(text: str) -> str:
         result = text[:10000]
 
     return truncate_text(result, max_chars=80_000)
+
+
+def validate_api_key(api_key: str) -> bool:
+    """Prüft ob ein Anthropic API-Key gültig ist."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "test"}],
+        )
+        return True
+    except anthropic.AuthenticationError:
+        return False
+    except Exception:
+        return False

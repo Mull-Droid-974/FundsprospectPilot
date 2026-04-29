@@ -31,8 +31,9 @@ _COLS = [
     ("fondsname",     "Fondsname",     220),
     ("fondstyp",      "Fondstyp",      100),
     ("anlegertyp",    "Anlegertyp",    160),
-    ("kundentyp",     "Kundentyp",     150),
-    ("segmentierung", "Segmentierung", 110),
+    ("kundentyp",      "Kundentyp",     150),
+    ("mindestanlage",  "Mindestanlage", 130),
+    ("segmentierung",  "Segmentierung", 110),
     ("konfidenz",     "Konfidenz",      80),
     ("analysiert_am", "Analysiert am", 130),
     ("prospekt_pfad",    "Prospekt-Datei",  200),
@@ -78,7 +79,8 @@ class ResultsWindow(tk.Toplevel):
         self.geometry("1100x600")
         self.minsize(800, 400)
 
-        self._all_rows: list[dict] = []   # Alle DB-Einträge (ungefiltert)
+        self._all_rows: list[dict] = []      # Alle DB-Einträge (ungefiltert)
+        self._visible_rows: list[dict] = []  # Aktuell angezeigte Zeilen (nach Filter)
         self._sort_col: str = "analysiert_am"
         self._sort_rev: bool = True
 
@@ -247,6 +249,7 @@ class ResultsWindow(tk.Toplevel):
             reverse=self._sort_rev,
         )
 
+        self._visible_rows = rows
         self._fill_tree(rows)
 
         total = len(self._all_rows)
@@ -413,20 +416,50 @@ class ResultsWindow(tk.Toplevel):
             self.refresh()
 
     def _export_excel(self):
+        rows = self._visible_rows
+        is_filtered = bool(self._search_var.get().strip())
+        label = f"gefiltert, {len(rows)} Zeilen" if is_filtered else f"{len(rows)} Zeilen"
+
         path = filedialog.asksaveasfilename(
             parent=self,
             defaultextension=".xlsx",
             filetypes=[("Excel-Datei", "*.xlsx")],
             initialfile="fonds_ergebnisse.xlsx",
-            title="Ergebnisse exportieren",
+            title=f"Ergebnisse exportieren ({label})",
         )
         if not path:
             return
         try:
-            results_store.export_to_excel(path)
+            import openpyxl
+            from openpyxl.styles import Alignment, Font, PatternFill
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Fonds-Ergebnisse"
+
+            header_fill = PatternFill("solid", fgColor="1e1e2e")
+            header_font = Font(bold=True, color="cdd6f4")
+
+            for col_idx, (_, header, _) in enumerate(_COLS, start=1):
+                cell = ws.cell(row=1, column=col_idx, value=header)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+
+            for row_idx, row in enumerate(rows, start=2):
+                for col_idx, (key, _, _) in enumerate(_COLS, start=1):
+                    ws.cell(row=row_idx, column=col_idx,
+                            value=row.get(key, "") or "")
+
+            for col_idx, (_, _, px_width) in enumerate(_COLS, start=1):
+                ws.column_dimensions[
+                    openpyxl.utils.get_column_letter(col_idx)
+                ].width = max(8, min(60, px_width // 7))
+
+            wb.save(path)
             messagebox.showinfo(
                 "Export erfolgreich",
-                f"Datei gespeichert:\n{path}",
+                f"{len(rows)} Einträge ({label}) gespeichert:\n{path}",
                 parent=self,
             )
         except Exception as e:

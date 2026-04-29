@@ -346,6 +346,133 @@ def fetch_prospectus(
     return None
 
 
+# ─── Comparison-Dokumente ─────────────────────────────────────────────────────
+
+# Mögliche fundinfo D-Keys für Factsheets / Jahresberichte / Halbjahresberichte.
+# Die genauen Keys variieren je nach Fonds/Profil; wir probieren alle durch.
+_FACTSHEET_KEYS    = ["FS", "FS2", "SH", "KF", "FSH", "FCS", "FACT"]
+_ANNUAL_RPT_KEYS   = ["AR", "JB", "GB", "ANN", "ANR", "YR", "RAJ", "ARA"]
+_HALFYEAR_RPT_KEYS = ["SAR", "SR", "HJB", "HB", "HAR", "SYR", "SRA", "RASM"]
+
+
+def _download_named(
+    url: str,
+    folder: Path,
+    filename: str,
+    session: requests.Session,
+    max_mb: float = 30.0,
+) -> Optional[str]:
+    """Lädt ein Dokument mit festem Dateinamen herunter. Cacht vorhandene Dateien."""
+    save_path = folder / filename
+    if save_path.exists():
+        logger.info(f"Dokument gecacht: {filename}")
+        return str(save_path)
+    try:
+        resp = session.get(url, timeout=60, stream=True)
+        resp.raise_for_status()
+        chunks = []
+        for chunk in resp.iter_content(chunk_size=65536):
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        if not content.startswith(b"%PDF") and b"%PDF" not in content[:1024]:
+            logger.warning(f"Dokument ist keine PDF: {url[:80]}")
+            return None
+        size_mb = len(content) / (1024 * 1024)
+        if size_mb > max_mb:
+            logger.warning(f"Dokument zu gross ({size_mb:.1f} MB): {filename}")
+            return None
+        with open(save_path, "wb") as f:
+            f.write(content)
+        logger.info(f"Gespeichert: {filename} ({size_mb:.2f} MB)")
+        return str(save_path)
+    except requests.RequestException as e:
+        logger.error(f"Download-Fehler für {filename}: {e}")
+        if save_path.exists():
+            save_path.unlink()
+        return None
+
+
+def fetch_comparison_docs(
+    isin: str,
+    save_folder: str,
+    delay: float = 1.5,
+) -> dict:
+    """
+    Ruft Metadaten und Vergleichsdokumente (Factsheet, Jahresbericht,
+    Halbjahresbericht) für eine ISIN von fundinfo.com ab.
+
+    Returns:
+        {
+          "factsheet":    str | None,   # lokaler Pfad
+          "annual":       str | None,
+          "halfyear":     str | None,
+          "available_keys": list[str],  # alle D-Keys mit Inhalt (für Debugging)
+          "meta": {
+              "name":          str,
+              "anteilsklasse": str,
+              "waehrung":      str,
+              "ter":           str,
+              "profile":       str,
+          }
+        }
+    """
+    folder = Path(save_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    result: dict = {
+        "factsheet":      None,
+        "annual":         None,
+        "halfyear":       None,
+        "available_keys": [],
+        "meta":           {},
+    }
+
+    session = _get_session()
+
+    for profile in PROFILES:
+        time.sleep(delay)
+        item = _query_api_full(isin, profile, session)
+        if item is None:
+            continue
+
+        s = item.get("S") or {}
+        d = item.get("D") or {}
+
+        result["meta"] = {
+            "name":          s.get("OFST900016", ""),
+            "anteilsklasse": s.get("OFST020050", ""),
+            "waehrung":      s.get("OFST010410", ""),
+            "ter":           s.get("OFST452000", ""),
+            "profile":       profile,
+        }
+
+        available = [k for k, v in d.items() if v]
+        result["available_keys"] = available
+        logger.info(f"fundinfo D-Keys für {isin} @ {profile}: {available}")
+
+        def _try_keys(keys: list[str], prefix: str) -> Optional[str]:
+            for key in keys:
+                docs = d.get(key, [])
+                if not docs:
+                    continue
+                doc_info = _best_doc_from_list(docs)
+                if doc_info and doc_info.get("url"):
+                    lang = doc_info.get("language", "XX")
+                    filename = f"{prefix}_{isin}_{lang}.pdf"
+                    path = _download_named(doc_info["url"], folder, filename, session)
+                    if path:
+                        logger.info(f"  → {prefix} gefunden (Key={key}, Lang={lang})")
+                        return path
+            return None
+
+        result["factsheet"] = _try_keys(_FACTSHEET_KEYS,    "FS")
+        result["annual"]    = _try_keys(_ANNUAL_RPT_KEYS,   "AR")
+        result["halfyear"]  = _try_keys(_HALFYEAR_RPT_KEYS, "HJB")
+        break  # Metadata + Keys wurden von diesem Profil geliefert
+
+    return result
+
+
 # Reihenfolge der KIID/KID-Dokumenttypen die wir probieren
 # PRP = PRIIPs Basisinformationsblatt (bestätigt für IE, LU, AT ISINs)
 _KIID_KEYS = ["PRP", "KI", "KID", "WAI", "DICI", "EKI"]

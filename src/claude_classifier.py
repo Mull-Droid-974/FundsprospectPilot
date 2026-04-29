@@ -113,8 +113,12 @@ def classify_prospectus(
         response = client.messages.create(
             model=selected_model,
             max_tokens=512,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
+            system=[{"type": "text", "text": SYSTEM_PROMPT,
+                     "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": user_message,
+                 "cache_control": {"type": "ephemeral"}},
+            ]}],
         )
 
         # Text-Block aus der Antwort extrahieren
@@ -180,18 +184,4 @@ def _parse_result(text: str, isin: str = "") -> dict:
         return result
 
 
-def validate_api_key(api_key: str) -> bool:
-    """Prüft ob der API-Key gültig ist."""
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        # Kleinen Test-Request senden
-        client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=10,
-            messages=[{"role": "user", "content": "test"}],
-        )
-        return True
-    except anthropic.AuthenticationError:
-        return False
-    except Exception:
-        return False
+from utils import validate_api_key  # noqa: F401 — Re-Export für Rückwärtskompatibilität

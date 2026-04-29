@@ -34,11 +34,12 @@ BTN_ACTIVE      = "#585b70"
 _PDF_FOLDER = Path(__file__).parent.parent / "data" / "prospekte"
 
 _COLS = [
-    ("isin",          "ISIN",           130),
-    ("subfonds_name", "Unterfonds",     220),
-    ("anteilsklasse", "Anteilsklasse",  150),
-    ("prospekt_pfad", "Prospekt-Datei", 200),
-    ("prospekt_url",  "Prospekt-URL",   180),
+    ("isin",                    "ISIN",           130),
+    ("subfonds_name",           "Unterfonds",     220),
+    ("anteilsklasse",           "Anteilsklasse",  150),
+    ("prospekt_pfad",           "Prospekt-Datei", 200),
+    ("prospekt_url",            "Prospekt-URL",   180),
+    ("prospekt_nicht_gefunden", "Nicht gef.",     120),
 ]
 
 
@@ -83,6 +84,15 @@ class DownloadWindow(tk.Toplevel):
             activebackground=BTN_ACTIVE, state="disabled"
         )
         self.btn_stop.pack(side="right", padx=(4, 0))
+
+        self._skip_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            inner, text="Nicht gef. überspringen",
+            variable=self._skip_var,
+            bg=BG_PANEL, fg=FG_MUTED, selectcolor=BG_INPUT,
+            activebackground=BG_PANEL, activeforeground=FG_TEXT,
+            font=("Segoe UI", 9), cursor="hand2",
+        ).pack(side="right", padx=(12, 4))
 
         self.btn_batch = tk.Button(
             inner, text="📥  Alle fehlenden downloaden",
@@ -190,8 +200,9 @@ class DownloadWindow(tk.Toplevel):
         self._tree.bind("<Double-1>", self._on_double_click)
         self._tree.bind("<Button-1>", self._on_click)
 
-        self._tree.tag_configure("ok",      background="#1a2e1a", foreground=ACCENT_GREEN)
-        self._tree.tag_configure("missing", background=BG_PANEL,  foreground=FG_MUTED)
+        self._tree.tag_configure("ok",        background="#1a2e1a", foreground=ACCENT_GREEN)
+        self._tree.tag_configure("missing",   background=BG_PANEL,  foreground=FG_MUTED)
+        self._tree.tag_configure("not_found", background="#2e1a1a", foreground=ACCENT_RED)
 
         # Log-Bereich
         tk.Label(
@@ -217,15 +228,22 @@ class DownloadWindow(tk.Toplevel):
         for row in rows:
             pfad = row.get("prospekt_pfad", "") or ""
             url  = row.get("prospekt_url",  "") or ""
+            nf   = row.get("prospekt_nicht_gefunden", "") or ""
             exists = bool(pfad) and Path(pfad).exists()
             display_pfad = ("✓ " + Path(pfad).name) if exists else "—"
-            tag = "ok" if exists else "missing"
+            if exists:
+                tag = "ok"
+            elif nf:
+                tag = "not_found"
+            else:
+                tag = "missing"
             self._tree.insert("", "end", iid=row["isin"], values=(
                 row.get("isin", ""),
                 row.get("subfonds_name", "") or "—",
                 row.get("anteilsklasse", "") or "—",
                 display_pfad,
                 url or "—",
+                nf or "—",
             ), tags=(tag,))
 
     def _sort_by(self, col: str):
@@ -264,14 +282,14 @@ class DownloadWindow(tk.Toplevel):
     # ─── Worker starten/stoppen ───────────────────────────────────────────────
 
     def _start_batch(self):
-        queue_rows = results_store.get_prospekt_queue()
+        queue_rows = results_store.get_prospekt_queue(skip_nicht_gefunden=self._skip_var.get())
         if not queue_rows:
             messagebox.showinfo("Keine ISINs", "Alle ISINs haben bereits ein Prospekt.", parent=self)
             return
         self._start_worker(queue_rows)
 
     def _start_phase2_only(self):
-        rows = [r for r in results_store.get_prospekt_queue() if r.get("subfonds_id")]
+        rows = [r for r in results_store.get_prospekt_queue(skip_nicht_gefunden=self._skip_var.get()) if r.get("subfonds_id")]
         if not rows:
             messagebox.showinfo(
                 "Keine ISINs",

@@ -11,9 +11,11 @@ Phase 2: Gruppierter Download (1 PDF pro Unterfonds)
 """
 
 import queue
+import re
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,14 +45,22 @@ class ProspektWorker(threading.Thread):
         event_queue: queue.Queue,
         delay: float = 1.5,
         single_mode: bool = False,  # True = nur diese ISINs, keine Gruppen-Erweiterung
+        parallel: int = 4,          # Anzahl paralleler Download-Threads (Phase 2)
+        meta_parallel: int = 4,     # Anzahl paralleler Metadaten-Threads (Phase 1)
     ):
         super().__init__(daemon=True)
         self._isins = isins
         self._pdf_folder = pdf_folder
         self._queue = event_queue
         self._delay = delay
+        self._meta_delay = 1.0      # JSON-Calls brauchen weniger Abstand als PDF-Downloads
         self._single_mode = single_mode
+        self._parallel = parallel
+        self._meta_parallel = meta_parallel
         self._stop_flag = False
+        self._lock = threading.Lock()
+        self._url_lock = threading.Lock()   # schützt _active_urls
+        self._active_urls: set[str] = set() # URLs die gerade heruntergeladen werden
         self._done = 0
         self._skipped = 0
         self._failed = 0
@@ -73,55 +83,215 @@ class ProspektWorker(threading.Thread):
 
     # ─── Phase 1: Metadaten ──────────────────────────────────────────────────
 
+    def _fetch_one_meta(self, row: dict, total: int):
+        """Holt Metadaten für eine ISIN. Läuft in einem Thread-Pool-Worker."""
+        if self._stop_flag:
+            return
+        isin = row["isin"]
+        self._emit("log", isin, "Metadaten abrufen …", total=total)
+        try:
+            meta = fundinfo_client.fetch_fund_metadata(isin, delay=self._meta_delay)
+        except Exception as exc:
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin, f"Metadaten-Fehler: {exc}", total=total)
+            return
+        if meta:
+            try:
+                results_store.update_fundinfo_meta(
+                    isin,
+                    subfonds_id=meta["subfonds_id"],
+                    subfonds_name=meta["subfonds_name"],
+                    umbrella_id=meta["umbrella_id"],
+                    anteilsklasse=meta["anteilsklasse"],
+                    ausschuettungsart=meta["ausschuettungsart"],
+                    fondswaehrung=meta["fondswaehrung"],
+                    fundinfo_ter=meta["fundinfo_ter"],
+                    prospekt_url=meta["prospekt_url"],
+                    fundinfo_investor_type=meta.get("fundinfo_investor_type", ""),
+                    ongoing_charges_datum=meta.get("ongoing_charges_datum", ""),
+                    qualif_anleger_ch=meta.get("qualif_anleger_ch", ""),
+                    institutional_ch=meta.get("institutional_ch", ""),
+                )
+            except Exception as exc:
+                with self._lock:
+                    self._failed += 1
+                self._emit("error", isin, f"DB-Fehler Phase 1: {exc}", total=total)
+                return
+            with self._lock:
+                self._done += 1
+            self._emit("progress", isin,
+                f"Unterfonds: {meta['subfonds_name'] or '—'}", total=total)
+        else:
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin, "Keine Daten von fundinfo", total=total)
+            results_store.mark_meta_not_found(isin)
+            results_store.mark_prospekt_nicht_gefunden(isin)
+
     def _load_metadata(self, isins_without_meta: list[dict]):
         self._phase = 1
         total = len(isins_without_meta)
-        self._emit("log", message=f"Phase 1: Metadaten für {total} ISIN(s) laden …", total=total)
+        self._emit("log",
+            message=f"Phase 1: Metadaten für {total} ISIN(s) laden ({self._meta_parallel} parallel) …",
+            total=total)
 
-        for row in isins_without_meta:
-            if self._stop_flag:
-                return
-            isin = row["isin"]
-            self._emit("log", isin, f"Metadaten abrufen …", total=total)
-
-            meta = None
-            try:
-                meta = fundinfo_client.fetch_fund_metadata(isin, delay=self._delay)
-            except Exception as exc:
-                self._emit("error", isin, f"Metadaten-Fehler: {exc}", total=total)
-                self._failed += 1
-                continue
-
-            if meta:
+        with ThreadPoolExecutor(max_workers=self._meta_parallel) as executor:
+            futures = [
+                executor.submit(self._fetch_one_meta, row, total)
+                for row in isins_without_meta
+            ]
+            for future in as_completed(futures):
                 try:
-                    results_store.update_fundinfo_meta(
-                        isin,
-                        subfonds_id=meta["subfonds_id"],
-                        subfonds_name=meta["subfonds_name"],
-                        umbrella_id=meta["umbrella_id"],
-                        anteilsklasse=meta["anteilsklasse"],
-                        ausschuettungsart=meta["ausschuettungsart"],
-                        fondswaehrung=meta["fondswaehrung"],
-                        fundinfo_ter=meta["fundinfo_ter"],
-                        prospekt_url=meta["prospekt_url"],
-                        fundinfo_investor_type=meta.get("fundinfo_investor_type", ""),
-                        ongoing_charges_datum=meta.get("ongoing_charges_datum", ""),
-                        qualif_anleger_ch=meta.get("qualif_anleger_ch", ""),
-                        institutional_ch=meta.get("institutional_ch", ""),
-                    )
+                    future.result()
                 except Exception as exc:
-                    self._emit("error", isin, f"DB-Fehler Phase 1: {exc}", total=total)
-                    self._failed += 1
-                    continue
-                self._done += 1
-                self._emit("progress", isin,
-                    f"Unterfonds: {meta['subfonds_name'] or '—'}", total=total)
-            else:
-                self._failed += 1
-                self._emit("error", isin, "Keine Daten von fundinfo", total=total)
-                results_store.mark_meta_not_found(isin)
+                    self._emit("error", message=f"Unerwarteter Fehler Phase 1: {exc}")
+                if self._stop_flag:
+                    self._emit("log", message="Stopp angefordert — laufende Abfragen werden abgeschlossen.")
+                    break
 
     # ─── Phase 2: Gruppierter Download ───────────────────────────────────────
+
+    def _process_group(
+        self,
+        group_key: str,
+        group_rows: list[dict],
+        target_isins: set[str],
+        total_groups: int,
+    ):
+        """Verarbeitet eine Subfonds-Gruppe in einem eigenen Thread."""
+        if self._stop_flag:
+            return
+
+        isins_in_group = [r["isin"] for r in group_rows]
+        needs_download = [
+            r for r in group_rows
+            if not r.get("prospekt_pfad") or not Path(r["prospekt_pfad"]).exists()
+        ]
+
+        if not needs_download:
+            with self._lock:
+                self._skipped += 1
+                self._emit("log", isin=isins_in_group[0],
+                    message=f"Gruppe übersprungen (alle {len(group_rows)} ISINs vorhanden)",
+                    total=total_groups)
+            return
+
+        # A) Bereits vorhandener Pfad in der Gruppe?
+        existing_path = next(
+            (r["prospekt_pfad"] for r in group_rows
+             if r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()),
+            None
+        )
+        if existing_path:
+            for r in needs_download:
+                results_store.update_prospekt(r["isin"], existing_path, r.get("prospekt_url", ""))
+            with self._lock:
+                self._done += 1
+                self._emit("progress", isin=isins_in_group[0],
+                    message=f"Verknüpft ({len(needs_download)} ISINs → {Path(existing_path).name})",
+                    total=total_groups)
+            return
+
+        # B) URL aus DB oder neu ermitteln
+        ref_row = group_rows[0]
+        prospekt_url = next(
+            (r.get("prospekt_url", "") for r in group_rows
+             if r.get("prospekt_url") and not r["prospekt_url"].startswith("__")),
+            ""
+        )
+        if not prospekt_url:
+            self._emit("log", isin=ref_row["isin"], message="URL ermitteln …", total=total_groups)
+            try:
+                doc_info = fundinfo_client.discover_prospectus_url(
+                    ref_row["isin"], delay=self._delay)
+                prospekt_url = doc_info["url"] if doc_info else ""
+            except Exception as exc:
+                with self._lock:
+                    self._failed += 1
+                self._emit("error", isin=ref_row["isin"],
+                           message=f"URL-Fehler: {exc}", total=total_groups)
+                return
+
+        if not prospekt_url:
+            for r in group_rows:
+                results_store.mark_prospekt_nicht_gefunden(r["isin"])
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin=ref_row["isin"],
+                       message="Kein Prospekt auf fundinfo gefunden", total=total_groups)
+            return
+
+        # Prüfen ob diese URL bereits von einer anderen Gruppe gecacht oder gerade
+        # in einem anderen Thread im Download ist — verhindert Doppel-Downloads.
+        with self._url_lock:
+            if prospekt_url in self._active_urls:
+                # Anderer Thread lädt gerade — diese Gruppe überspringen;
+                # update_prospekt wird vom anderen Thread für alle ISINs erledigt.
+                with self._lock:
+                    self._skipped += 1
+                self._emit("log", isin=ref_row["isin"],
+                    message="URL wird von anderem Thread geladen — übersprungen",
+                    total=total_groups)
+                return
+            cached = results_store.get_by_prospekt_url(prospekt_url)
+            if cached and cached.get("prospekt_pfad") and Path(cached["prospekt_pfad"]).exists():
+                cached_path = cached["prospekt_pfad"]
+                for r in group_rows:
+                    results_store.update_prospekt(r["isin"], cached_path, prospekt_url)
+                with self._lock:
+                    self._done += 1
+                self._emit("progress", isin=ref_row["isin"],
+                    message=f"Verknüpft aus Cache → {Path(cached_path).name}",
+                    total=total_groups)
+                return
+            self._active_urls.add(prospekt_url)
+
+        # C) Download
+        lang = next(
+            (r.get("prospekt_lang", "") for r in group_rows if r.get("prospekt_lang", "")), "XX"
+        )
+        if not lang or lang == "XX":
+            m = re.search(r'_([A-Z]{2})_\d{4}', prospekt_url)
+            if m:
+                lang = m.group(1)
+
+        subfonds_name = next(
+            (r.get("subfonds_name", "") for r in group_rows if r.get("subfonds_name")), "")
+        short_name = subfonds_name.split(" - ")[-1][:30] if subfonds_name else group_key[:8]
+
+        pdf_path = None
+        try:
+            pdf_path = fundinfo_client.download_prospekt_from_url(
+                prospekt_url, short_name, lang, str(self._pdf_folder)
+            )
+        except Exception as exc:
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin=ref_row["isin"],
+                       message=f"Download-Fehler: {exc}", total=total_groups)
+            return
+        finally:
+            with self._url_lock:
+                self._active_urls.discard(prospekt_url)
+
+        if pdf_path:
+            for r in group_rows:
+                results_store.update_prospekt(r["isin"], pdf_path, prospekt_url)
+            with self._lock:
+                self._done += 1
+            self._emit("progress", isin=ref_row["isin"],
+                message=f"{Path(pdf_path).name} → {len(group_rows)} ISIN(s)",
+                total=total_groups)
+        else:
+            for r in group_rows:
+                results_store.mark_prospekt_nicht_gefunden(r["isin"])
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin=ref_row["isin"],
+                       message="Download fehlgeschlagen", total=total_groups)
+
+    # ─── Phase 2: Gruppierter Download (parallel) ────────────────────────────
 
     def _download_groups(self, target_isins: set[str]):
         self._phase = 2
@@ -131,142 +301,37 @@ class ProspektWorker(threading.Thread):
 
         groups = results_store.get_subfonds_groups()
 
-        # Im single_mode nur Gruppen verarbeiten, die target ISINs enthalten
         if self._single_mode:
             groups = {
                 k: v for k, v in groups.items()
                 if any(r["isin"] in target_isins for r in v)
             }
 
-        # Gruppen ohne subfonds_id (leerer Key) einzeln behandeln
         ungrouped = groups.pop("", [])
         if ungrouped:
             groups.update({f"__single_{r['isin']}": [r] for r in ungrouped
                            if r["isin"] in target_isins})
 
         total_groups = len(groups)
-        self._emit("log", message=f"Phase 2: {total_groups} Unterfonds-Gruppen …",
-                   total=total_groups)
+        self._emit("log",
+            message=f"Phase 2: {total_groups} Unterfonds-Gruppen ({self._parallel} parallel) …",
+            total=total_groups)
 
-        for group_key, group_rows in groups.items():
-            if self._stop_flag:
-                self._emit("log", message="Download abgebrochen.")
-                break
-
-            isins_in_group = [r["isin"] for r in group_rows]
-            needs_download = [
-                r for r in group_rows
-                if not r.get("prospekt_pfad") or not Path(r["prospekt_pfad"]).exists()
-            ]
-
-            if not needs_download:
-                self._skipped += 1
-                self._emit("log", isin=isins_in_group[0],
-                    message=f"Gruppe übersprungen (alle {len(group_rows)} ISINs vorhanden)",
-                    total=total_groups)
-                continue
-
-            # A) Bereits vorhandener Pfad in der Gruppe?
-            existing_path = next(
-                (r["prospekt_pfad"] for r in group_rows
-                 if r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()),
-                None
-            )
-            if existing_path:
-                for r in needs_download:
-                    results_store.update_prospekt(r["isin"], existing_path,
-                                                  r.get("prospekt_url", ""))
-                self._done += 1
-                self._emit("progress", isin=isins_in_group[0],
-                    message=f"Verknüpft ({len(needs_download)} ISINs → {Path(existing_path).name})",
-                    total=total_groups)
-                continue
-
-            # B) URL aus DB oder neu ermitteln
-            ref_row = group_rows[0]
-            prospekt_url = next(
-                (r.get("prospekt_url", "") for r in group_rows
-                 if r.get("prospekt_url") and not r["prospekt_url"].startswith("__")),
-                ""
-            )
-            if not prospekt_url:
-                self._emit("log", isin=ref_row["isin"], message="URL ermitteln …",
-                           total=total_groups)
+        with ThreadPoolExecutor(max_workers=self._parallel) as executor:
+            futures = {
+                executor.submit(
+                    self._process_group, key, rows, target_isins, total_groups
+                ): key
+                for key, rows in groups.items()
+            }
+            for future in as_completed(futures):
                 try:
-                    doc_info = fundinfo_client.discover_prospectus_url(
-                        ref_row["isin"], delay=self._delay)
-                    prospekt_url = doc_info["url"] if doc_info else ""
+                    future.result()
                 except Exception as exc:
-                    self._failed += 1
-                    self._emit("error", isin=ref_row["isin"],
-                               message=f"URL-Fehler: {exc}", total=total_groups)
-                    continue
-
-            if not prospekt_url:
-                self._failed += 1
-                self._emit("error", isin=ref_row["isin"],
-                           message="Kein Prospekt auf fundinfo gefunden", total=total_groups)
-                continue
-
-            # Prüfen ob diese URL bereits von einer anderen Gruppe vorliegt
-            cached = results_store.get_by_prospekt_url(prospekt_url)
-            if cached and cached.get("prospekt_pfad") and Path(cached["prospekt_pfad"]).exists():
-                cached_path = cached["prospekt_pfad"]
-                for r in group_rows:
-                    results_store.update_prospekt(r["isin"], cached_path, prospekt_url)
-                self._done += 1
-                self._emit("progress", isin=ref_row["isin"],
-                    message=f"Verknüpft aus Cache → {Path(cached_path).name}",
-                    total=total_groups)
-                continue
-
-            # C) Download
-            subfonds_code = ref_row.get("subfonds_id", "")[:8] if not (
-                next((r.get("subfonds_name") for r in group_rows if r.get("subfonds_name")), "")
-            ) else ""
-            # Verwende subfonds_code aus Metadaten falls in prospekt_url kodiert,
-            # ansonsten ersten 8 Zeichen der subfonds_id als Fallback
-            lang = next(
-                (r.get("prospekt_lang", "") for r in group_rows if r.get("prospekt_lang", "")),
-                "XX"
-            )
-            # Extrahiere Sprache aus URL falls vorhanden
-            if not lang or lang == "XX":
-                import re
-                m = re.search(r'_([A-Z]{2})_\d{4}', prospekt_url)
-                if m:
-                    lang = m.group(1)
-
-            # Kurznamen für Datei aus subfonds_name ableiten
-            subfonds_name = next(
-                (r.get("subfonds_name", "") for r in group_rows if r.get("subfonds_name")), "")
-            # Nimm letzten Teil nach " - " als Kurzname, oder ersten 20 Zeichen
-            short_name = subfonds_name.split(" - ")[-1][:30] if subfonds_name else group_key[:8]
-
-            pdf_path = None
-            try:
-                pdf_path = fundinfo_client.download_prospekt_from_url(
-                    prospekt_url, short_name, lang, str(self._pdf_folder)
-                )
-            except Exception as exc:
-                self._failed += 1
-                self._emit("error", isin=ref_row["isin"],
-                           message=f"Download-Fehler: {exc}", total=total_groups)
-                continue
-
-            if pdf_path:
-                for r in group_rows:
-                    results_store.update_prospekt(r["isin"], pdf_path, prospekt_url)
-                self._done += 1
-                self._emit("progress", isin=ref_row["isin"],
-                    message=f"{Path(pdf_path).name} → {len(group_rows)} ISIN(s)",
-                    total=total_groups)
-            else:
-                self._failed += 1
-                self._emit("error", isin=ref_row["isin"],
-                           message="Download fehlgeschlagen", total=total_groups)
-
-            time.sleep(self._delay)
+                    self._emit("error", message=f"Unerwarteter Gruppen-Fehler: {exc}")
+                if self._stop_flag:
+                    self._emit("log", message="Stopp angefordert — laufende Downloads werden abgeschlossen.")
+                    break
 
     # ─── Hauptlauf ───────────────────────────────────────────────────────────
 

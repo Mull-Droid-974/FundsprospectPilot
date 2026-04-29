@@ -4,7 +4,7 @@ import os
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from dotenv import set_key
 
@@ -38,7 +38,7 @@ class AdminPanel(tk.Toplevel):
         super().__init__(parent)
         self.title("Admin-Einstellungen")
         self.configure(bg=BG_MAIN)
-        self.geometry("520x560")
+        self.geometry("520x680")
         self.resizable(False, False)
         self.grab_set()
 
@@ -80,6 +80,26 @@ class AdminPanel(tk.Toplevel):
         return cb
 
     def _build_ui(self):
+        # ── Datei-Konfiguration ───────────────────────────────────────
+        file_frame = self._section(self, "Datei-Konfiguration")
+        file_frame.columnconfigure(1, weight=1)
+        self.var_excel = tk.StringVar()
+        self.var_pdf_folder = tk.StringVar()
+
+        self._field(file_frame, "Excel-Datei:", self.var_excel, 0)
+        tk.Button(
+            file_frame, text="...", command=self._browse_excel,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 8), padx=6, cursor="hand2"
+        ).grid(row=0, column=2, padx=(4, 0), pady=4)
+
+        self._field(file_frame, "PDF-Ordner:", self.var_pdf_folder, 1)
+        tk.Button(
+            file_frame, text="...", command=self._browse_pdf_folder,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 8), padx=6, cursor="hand2"
+        ).grid(row=1, column=2, padx=(4, 0), pady=4)
+
         # ── API ───────────────────────────────────────────────────────
         api_frame = self._section(self, "API-Konfiguration")
         self.var_key = tk.StringVar()
@@ -175,7 +195,23 @@ class AdminPanel(tk.Toplevel):
             font=("Segoe UI", 10), padx=14, pady=6, cursor="hand2"
         ).pack(side="right", padx=(0, 8))
 
+    def _browse_excel(self):
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Excel-Datei wählen",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Alle Dateien", "*.*")],
+        )
+        if path:
+            self.var_excel.set(path)
+
+    def _browse_pdf_folder(self):
+        path = filedialog.askdirectory(parent=self, title="PDF-Ordner wählen")
+        if path:
+            self.var_pdf_folder.set(path)
+
     def _load(self):
+        self.var_excel.set(os.getenv("EXCEL_PATH", "data/input/fonds_universe.xlsx"))
+        self.var_pdf_folder.set(os.getenv("PDF_FOLDER", "data/prospectus"))
         self.var_key.set(os.getenv("ANTHROPIC_API_KEY", ""))
         self.var_batch_model.set(
             os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001")
@@ -197,7 +233,7 @@ class AdminPanel(tk.Toplevel):
 
         def check():
             try:
-                from claude_classifier import validate_api_key
+                from utils import validate_api_key
                 ok = validate_api_key(key)
             except Exception:
                 ok = False
@@ -217,6 +253,16 @@ class AdminPanel(tk.Toplevel):
         if not env_path.exists():
             env_path.write_text("")
 
+        excel = self.var_excel.get().strip()
+        if excel:
+            set_key(".env", "EXCEL_PATH", excel)
+            os.environ["EXCEL_PATH"] = excel
+
+        pdf_folder = self.var_pdf_folder.get().strip()
+        if pdf_folder:
+            set_key(".env", "PDF_FOLDER", pdf_folder)
+            os.environ["PDF_FOLDER"] = pdf_folder
+
         key = self.var_key.get().strip()
         if key:
             set_key(".env", "ANTHROPIC_API_KEY", key)
@@ -227,15 +273,6 @@ class AdminPanel(tk.Toplevel):
         set_key(".env", "BATCH_SIZE", self.var_batch_size.get().strip())
         set_key(".env", "REQUEST_DELAY", self.var_delay.get().strip())
         set_key(".env", "MAX_RETRIES", self.var_retries.get().strip())
-
-        # Hauptfenster-Felder synchronisieren
-        try:
-            if key and hasattr(self._parent, "var_api_key"):
-                self._parent.var_api_key.set(key)
-            if hasattr(self._parent, "var_batch_size"):
-                self._parent.var_batch_size.set(self.var_batch_size.get().strip())
-        except Exception:
-            pass
 
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.", parent=self)
         self.destroy()
