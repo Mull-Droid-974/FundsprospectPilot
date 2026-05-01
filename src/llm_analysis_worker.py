@@ -26,7 +26,7 @@ from utils import logger
 
 
 _RATE_LIMIT_WAIT_SEC  = 2 * 3600   # 2 Stunden warten bei Rate Limit
-_RATE_LIMIT_MAX_RETRIES = 3
+_RATE_LIMIT_MAX_RETRIES = 6
 
 
 class _RateLimitRetry(Exception):
