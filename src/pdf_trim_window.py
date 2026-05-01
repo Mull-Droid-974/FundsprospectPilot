@@ -126,16 +126,33 @@ class _TrimWorker(threading.Thread):
 
             # 3. LLM-Trim
             client = anthropic.Anthropic(api_key=self._api_key)
-            response = client.messages.create(
-                model=self._model,
-                max_tokens=8192,
-                system=[{"type": "text", "text": self._prompt,
-                         "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": full_text[:80_000],
-                     "cache_control": {"type": "ephemeral"}},
-                ]}],
-            )
+            try:
+                response = client.messages.create(
+                    model=self._model,
+                    max_tokens=8192,
+                    system=[{"type": "text", "text": self._prompt,
+                             "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": full_text[:80_000],
+                         "cache_control": {"type": "ephemeral"}},
+                    ]}],
+                )
+            except anthropic.AuthenticationError:
+                self._queue.put(("error", "Ungültiger API-Key — bitte im Admin konfigurieren."))
+                return
+            except anthropic.RateLimitError:
+                self._queue.put(("error", "Rate Limit erreicht — bitte kurz warten und erneut starten."))
+                return
+            except anthropic.BadRequestError as exc:
+                self._queue.put(("error", f"Eingabe zu lang für Modell-Kontext — PDF kürzen: {exc}"))
+                return
+            except anthropic.APIStatusError as exc:
+                self._queue.put(("error", f"API-Fehler {exc.status_code}: {exc.message}"))
+                return
+
+            if response.stop_reason == "max_tokens":
+                self._queue.put(("log", "⚠ Ausgabe-Limit erreicht (max_tokens) — Text möglicherweise abgeschnitten."))
+
             trimmed = "".join(
                 block.text for block in response.content if hasattr(block, "text")
             )
@@ -206,16 +223,36 @@ class _BatchTrimWorker(threading.Thread):
                     continue
 
                 # LLM
-                response = client.messages.create(
-                    model=self._model,
-                    max_tokens=8192,
-                    system=[{"type": "text", "text": self._prompt,
-                             "cache_control": {"type": "ephemeral"}}],
-                    messages=[{"role": "user", "content": [
-                        {"type": "text", "text": full_text[:80_000],
-                         "cache_control": {"type": "ephemeral"}},
-                    ]}],
-                )
+                try:
+                    response = client.messages.create(
+                        model=self._model,
+                        max_tokens=8192,
+                        system=[{"type": "text", "text": self._prompt,
+                                 "cache_control": {"type": "ephemeral"}}],
+                        messages=[{"role": "user", "content": [
+                            {"type": "text", "text": full_text[:80_000],
+                             "cache_control": {"type": "ephemeral"}},
+                        ]}],
+                    )
+                except anthropic.AuthenticationError:
+                    self._emit("log", "✗ Ungültiger API-Key — Batch abgebrochen.")
+                    break
+                except anthropic.RateLimitError:
+                    self._emit("log", f"  ✗ Rate Limit erreicht — {Path(pdf_path).name} übersprungen.")
+                    self._emit("batch_progress", (done, total, pdf_path))
+                    continue
+                except anthropic.BadRequestError as exc:
+                    self._emit("log", f"  ✗ Eingabe zu lang (Context): {Path(pdf_path).name} — {exc}")
+                    self._emit("batch_progress", (done, total, pdf_path))
+                    continue
+                except anthropic.APIStatusError as exc:
+                    self._emit("log", f"  ✗ API-Fehler {exc.status_code}: {Path(pdf_path).name} — {exc.message}")
+                    self._emit("batch_progress", (done, total, pdf_path))
+                    continue
+
+                if response.stop_reason == "max_tokens":
+                    self._emit("log", f"  ⚠ {Path(pdf_path).name}: Ausgabe-Limit (max_tokens) — Text möglicherweise abgeschnitten.")
+
                 trimmed = "".join(
                     block.text for block in response.content if hasattr(block, "text")
                 )

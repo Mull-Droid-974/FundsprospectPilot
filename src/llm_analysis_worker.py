@@ -125,17 +125,29 @@ class LLMAnalysisWorker(threading.Thread):
         prompt = self._prompt_template.replace("{isin_list}", isin_list)
 
         client = anthropic.Anthropic(api_key=self._api_key)
-        response = client.messages.create(
-            model=self._model,
-            max_tokens=2048,
-            system=[{"type": "text", "text": prompt,
-                     "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": [
-                {"type": "text",
-                 "text": f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
-                 "cache_control": {"type": "ephemeral"}},
-            ]}],
-        )
+        try:
+            response = client.messages.create(
+                model=self._model,
+                max_tokens=2048,
+                system=[{"type": "text", "text": prompt,
+                         "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": [
+                    {"type": "text",
+                     "text": f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
+                     "cache_control": {"type": "ephemeral"}},
+                ]}],
+            )
+        except anthropic.AuthenticationError:
+            raise RuntimeError("Ungültiger API-Key — bitte im Admin konfigurieren.")
+        except anthropic.RateLimitError:
+            raise RuntimeError("Rate Limit erreicht — bitte kurz warten und Batch neu starten.")
+        except anthropic.BadRequestError as exc:
+            raise RuntimeError(f"Eingabe zu lang für Modell-Kontext — Prospekt kürzen: {exc}")
+        except anthropic.APIStatusError as exc:
+            raise RuntimeError(f"API-Fehler {exc.status_code}: {exc.message}")
+
+        if response.stop_reason == "max_tokens":
+            logger.warning("LLM-Ausgabe bei max_tokens abgeschnitten — JSON möglicherweise unvollständig.")
 
         raw = ""
         for block in response.content:

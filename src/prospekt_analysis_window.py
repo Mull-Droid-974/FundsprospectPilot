@@ -1,9 +1,9 @@
 """
 LLM-Prospekt-Analyse Fenster.
 
-Analysiert Fondsprospekte per LLM: ein Aufruf pro Subfonds, klassifiziert
-alle Anteilsklassen (ISINs) und schreibt fondstyp/anlegertyp/kundentyp/
-llm_segmentierung/llm_segmentierung_begruendung in die DB.
+Zeigt alle Subfonds-Gruppen als Tabelle mit Status (ausstehend / analysiert /
+teilweise / kein PDF). Batch-Start aller ausstehenden Gruppen oder Einzel-
+Start per Auswahl / Doppelklick.
 """
 
 import os
@@ -19,7 +19,6 @@ import results_store
 import typologie_store
 from llm_analysis_worker import AnalysisEvent, LLMAnalysisWorker
 
-# Farben
 BG_MAIN         = "#1e1e2e"
 BG_PANEL        = "#2a2a3e"
 BG_INPUT        = "#313145"
@@ -33,7 +32,6 @@ ACCENT_LAVENDER = "#b4befe"
 BTN_BG          = "#45475a"
 BTN_ACTIVE      = "#585b70"
 
-# Verfügbare Modelle (identisch mit admin_panel.py)
 MODELS = [
     "claude-sonnet-4-6",
     "claude-opus-4-7",
@@ -118,6 +116,22 @@ BEKANNTE ISINs IN DIESEM FONDS:
   ]
 }"""
 
+_STATUS_TEXT = {
+    "pending": "⏳ Ausstehend",
+    "done":    "✓ Analysiert",
+    "partial": "⚠ Teilweise",
+    "no_pdf":  "— Kein PDF",
+}
+
+_COLS = [
+    ("name",      "Subfonds / Name",   270, "w"),
+    ("umbrella",  "Umbrella",          170, "w"),
+    ("total",     "ISINs",              55, "center"),
+    ("pending",   "Offen",              55, "center"),
+    ("status",    "Status",            125, "w"),
+    ("last_date", "Letzte Analyse",    140, "w"),
+]
+
 
 class ProspektAnalysisWindow(tk.Toplevel):
 
@@ -125,14 +139,14 @@ class ProspektAnalysisWindow(tk.Toplevel):
         super().__init__(parent)
         self.title("LLM-Prospekt-Analyse")
         self.configure(bg=BG_MAIN)
-        self.geometry("920x700")
-        self.minsize(700, 500)
+        self.geometry("960x700")
+        self.minsize(780, 520)
 
         self._worker: LLMAnalysisWorker | None = None
         self._event_queue: queue.Queue = queue.Queue()
         self._prompt = DEFAULT_PROMPT
-        self._subfonds_map: dict[str, list] = {}   # subfonds_id → rows
-        self._umbrella_map: dict[str, list] = {}   # umbrella_id → rows
+        self._table_data: list[dict] = []
+        self._batch_errors: list[str] = []
 
         self._build_ui()
         self._refresh_data()
@@ -141,7 +155,12 @@ class ProspektAnalysisWindow(tk.Toplevel):
     # ─── UI ───────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Toolbar ──────────────────────────────────────────────────────────
+        self._build_toolbar()
+        self._build_table_area()
+        self._build_progress()
+        self._build_log()
+
+    def _build_toolbar(self):
         toolbar = tk.Frame(self, bg=BG_PANEL)
         toolbar.pack(fill="x")
         inner = tk.Frame(toolbar, bg=BG_PANEL)
@@ -163,7 +182,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
         self.btn_stop.pack(side="right", padx=(4, 0))
 
         tk.Button(
-            inner, text="✏  Prompt bearbeiten",
+            inner, text="✏  Prompt",
             command=self._open_prompt_editor,
             bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
@@ -171,103 +190,118 @@ class ProspektAnalysisWindow(tk.Toplevel):
         ).pack(side="right", padx=(4, 0))
 
         tk.Button(
-            inner, text="📋  Werte verwalten",
+            inner, text="📋  Werte",
             command=self._open_typologie,
             bg=BTN_BG, fg=ACCENT_YELLOW, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
             activebackground=BTN_ACTIVE,
         ).pack(side="right", padx=(4, 0))
 
-        # Modell-Auswahl
         tk.Label(
             inner, text="Modell:",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
-        ).pack(side="right", padx=(12, 4))
+        ).pack(side="right", padx=(16, 4))
 
         self._model_var = tk.StringVar(value=MODELS[0])
         ttk.Combobox(
             inner, textvariable=self._model_var,
-            values=MODELS, state="readonly", width=28,
+            values=MODELS, state="readonly", width=26,
             font=("Segoe UI", 9),
         ).pack(side="right")
 
-        # ── Auswahl-Frame ─────────────────────────────────────────────────────
-        sel_frame = tk.LabelFrame(
-            self, text="Auswahl", bg=BG_PANEL, fg=FG_MUTED,
-            font=("Segoe UI", 9), bd=1, relief="flat",
-        )
-        sel_frame.pack(fill="x", padx=12, pady=(8, 4))
+    def _build_table_area(self):
+        # ── Aktionszeile ──────────────────────────────────────────────────────
+        ctrl = tk.Frame(self, bg=BG_MAIN)
+        ctrl.pack(fill="x", padx=12, pady=(10, 4))
 
-        sel_inner = tk.Frame(sel_frame, bg=BG_PANEL)
-        sel_inner.pack(fill="x", padx=10, pady=8)
-
-        self._sel_mode = tk.StringVar(value="all")
-
-        # Alle nicht analysierten
-        row0 = tk.Frame(sel_inner, bg=BG_PANEL)
-        row0.pack(fill="x", pady=2)
-        tk.Radiobutton(
-            row0, text="Alle nicht analysierten",
-            variable=self._sel_mode, value="all",
-            bg=BG_PANEL, fg=FG_TEXT, selectcolor=BG_INPUT,
-            activebackground=BG_PANEL, font=("Segoe UI", 9),
-            command=self._on_mode_change,
-        ).pack(side="left")
-        self._lbl_all_count = tk.Label(
-            row0, text="", bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
-        )
-        self._lbl_all_count.pack(side="left", padx=(6, 0))
-
-        # Umbrella auswählen
-        row1 = tk.Frame(sel_inner, bg=BG_PANEL)
-        row1.pack(fill="x", pady=2)
-        tk.Radiobutton(
-            row1, text="Umbrella-Fonds:",
-            variable=self._sel_mode, value="umbrella",
-            bg=BG_PANEL, fg=FG_TEXT, selectcolor=BG_INPUT,
-            activebackground=BG_PANEL, font=("Segoe UI", 9),
-            command=self._on_mode_change,
-        ).pack(side="left")
-        self._umbrella_var = tk.StringVar()
-        self._umbrella_cb = ttk.Combobox(
-            row1, textvariable=self._umbrella_var,
-            state="readonly", width=50, font=("Segoe UI", 9),
-        )
-        self._umbrella_cb.pack(side="left", padx=(6, 0))
-        self._umbrella_cb.bind("<<ComboboxSelected>>", lambda _: None)
-
-        # Einzelner Subfonds
-        row2 = tk.Frame(sel_inner, bg=BG_PANEL)
-        row2.pack(fill="x", pady=2)
-        tk.Radiobutton(
-            row2, text="Einzelner Subfonds:",
-            variable=self._sel_mode, value="subfonds",
-            bg=BG_PANEL, fg=FG_TEXT, selectcolor=BG_INPUT,
-            activebackground=BG_PANEL, font=("Segoe UI", 9),
-            command=self._on_mode_change,
-        ).pack(side="left")
-        self._subfonds_var = tk.StringVar()
-        self._subfonds_cb = ttk.Combobox(
-            row2, textvariable=self._subfonds_var,
-            state="readonly", width=50, font=("Segoe UI", 9),
-        )
-        self._subfonds_cb.pack(side="left", padx=(6, 0))
-
-        # Start-Button
-        btn_row = tk.Frame(sel_inner, bg=BG_PANEL)
-        btn_row.pack(fill="x", pady=(8, 0))
-        self.btn_start = tk.Button(
-            btn_row, text="▶  Analyse starten",
-            command=self._start_analysis,
+        self.btn_all = tk.Button(
+            ctrl, text="▶  Alle ausstehenden",
+            command=self._start_all_pending,
             bg="#1a2e1a", fg=ACCENT_GREEN, relief="flat",
-            font=("Segoe UI", 9, "bold"), padx=14, pady=4, cursor="hand2",
-            activebackground=BTN_ACTIVE,
+            font=("Segoe UI", 9, "bold"), padx=12, pady=3,
+            cursor="hand2", activebackground=BTN_ACTIVE,
         )
-        self.btn_start.pack(side="left")
+        self.btn_all.pack(side="left")
 
-        # ── Fortschritt ───────────────────────────────────────────────────────
+        self.btn_sel = tk.Button(
+            ctrl, text="▶  Ausgewählte starten",
+            command=self._start_selected,
+            bg="#1a1e2e", fg=ACCENT_BLUE, relief="flat",
+            font=("Segoe UI", 9), padx=12, pady=3,
+            cursor="hand2", activebackground=BTN_ACTIVE,
+        )
+        self.btn_sel.pack(side="left", padx=(6, 0))
+
+        tk.Button(
+            ctrl, text="↺",
+            command=self._refresh_data,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 9), padx=8, pady=3,
+            cursor="hand2", activebackground=BTN_ACTIVE,
+        ).pack(side="left", padx=(6, 0))
+
+        self._filter_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            ctrl, text="nur ausstehende",
+            variable=self._filter_var,
+            command=self._fill_tree,
+            bg=BG_MAIN, fg=FG_MUTED, selectcolor=BG_INPUT,
+            activebackground=BG_MAIN, activeforeground=FG_TEXT,
+            font=("Segoe UI", 9), cursor="hand2",
+        ).pack(side="left", padx=(14, 0))
+
+        self._summary_var = tk.StringVar(value="")
+        tk.Label(
+            ctrl, textvariable=self._summary_var,
+            bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8),
+        ).pack(side="right")
+
+        # ── Treeview ──────────────────────────────────────────────────────────
+        tree_frame = tk.Frame(self, bg=BG_MAIN)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+
+        cols = [c[0] for c in _COLS]
+        self._tree = ttk.Treeview(
+            tree_frame, columns=cols, show="headings",
+            selectmode="extended",
+        )
+
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Treeview",
+            background=BG_PANEL, foreground=FG_TEXT,
+            fieldbackground=BG_PANEL, rowheight=26,
+            font=("Segoe UI", 9))
+        style.configure("Treeview.Heading",
+            background=BG_INPUT, foreground=ACCENT_BLUE,
+            font=("Segoe UI", 9, "bold"))
+        style.map("Treeview", background=[("selected", "#3a3a5e")])
+
+        for col, header, width, anchor in _COLS:
+            self._tree.heading(col, text=header,
+                               command=lambda c=col: self._sort_by(c))
+            self._tree.column(col, width=width, minwidth=40, anchor=anchor)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",
+                            command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self._tree.pack(fill="both", expand=True)
+
+        self._tree.tag_configure("pending",
+            background="#272917", foreground=ACCENT_YELLOW)
+        self._tree.tag_configure("partial",
+            background="#18192c", foreground=ACCENT_BLUE)
+        self._tree.tag_configure("done",
+            background="#172317", foreground=ACCENT_GREEN)
+        self._tree.tag_configure("no_pdf",
+            background=BG_PANEL,  foreground=FG_MUTED)
+
+        self._tree.bind("<Double-1>", self._on_double_click)
+
+    def _build_progress(self):
         prog_frame = tk.Frame(self, bg=BG_MAIN)
-        prog_frame.pack(fill="x", padx=12, pady=(4, 2))
+        prog_frame.pack(fill="x", padx=12, pady=(2, 2))
 
         self._prog_var = tk.DoubleVar(value=0)
         self._prog_bar = ttk.Progressbar(
@@ -281,168 +315,189 @@ class ProspektAnalysisWindow(tk.Toplevel):
             bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 9),
         ).pack(side="left")
 
-        # ── Log ───────────────────────────────────────────────────────────────
+    def _build_log(self):
         tk.Label(
             self, text="Log", bg=BG_MAIN, fg=FG_MUTED,
             font=("Segoe UI", 8), anchor="w",
         ).pack(fill="x", padx=12)
 
         self._log = scrolledtext.ScrolledText(
-            self, bg=BG_INPUT, fg=FG_TEXT,
+            self, height=7, bg=BG_INPUT, fg=FG_TEXT,
             font=("Consolas", 8), state="disabled",
             insertbackground=FG_TEXT, relief="flat",
         )
-        self._log.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self._log.pack(fill="x", padx=12, pady=(0, 8))
 
-    # ─── Daten laden ──────────────────────────────────────────────────────────
+    # ─── Daten ────────────────────────────────────────────────────────────────
 
     def _refresh_data(self):
-        """Lädt Subfonds- und Umbrella-Gruppen aus der DB."""
-        # Subfonds-Gruppen die ein PDF haben
-        sfg = results_store.get_subfonds_groups()
-        self._subfonds_map = {
-            k: v for k, v in sfg.items()
-            if k and any(
+        all_rows = results_store.get_all_results()
+
+        raw: dict[str, list] = {}
+        for row in all_rows:
+            key = row.get("subfonds_id") or f"__single_{row['isin']}"
+            raw.setdefault(key, []).append(row)
+
+        self._table_data = []
+        for key, rows in raw.items():
+            has_pdf = any(
                 r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()
-                for r in v
+                for r in rows
             )
-        }
+            n_analyzed = sum(1 for r in rows if r.get("llm_segmentierung"))
+            n_pending  = len(rows) - n_analyzed
 
-        # Umbrella-Gruppen
-        ug = results_store.get_umbrella_groups()
-        self._umbrella_map = {
-            k: v for k, v in ug.items()
-            if k  # leeren Schlüssel (kein umbrella) ausschliessen
-        }
+            if not has_pdf:
+                status = "no_pdf"
+            elif n_pending == 0:
+                status = "done"
+            elif n_analyzed > 0:
+                status = "partial"
+            else:
+                status = "pending"
 
-        # Nicht-analysierte Queue
-        queue_rows = results_store.get_analysis_queue()
-        n_subfonds = len({r.get("subfonds_id", r["isin"]) for r in queue_rows if r.get("subfonds_id")})
-        n_single   = sum(1 for r in queue_rows if not r.get("subfonds_id"))
-        total_groups = n_subfonds + n_single
-        self._lbl_all_count.config(
-            text=f"({total_groups} Subfonds-Gruppen, {len(queue_rows)} ISINs)"
+            # Umbrella-Anzeigename aus fondsname ableiten
+            umbrella_id = rows[0].get("umbrella_id", "")
+            if umbrella_id:
+                fn = rows[0].get("fondsname", "")
+                umbrella_disp = fn.split(" - ")[0][:40] if " - " in fn else (fn[:40] or umbrella_id[:20])
+            else:
+                umbrella_disp = "—"
+
+            # Subfonds-Anzeigename
+            sf_name = (
+                rows[0].get("subfonds_name")
+                or rows[0].get("fondsname")
+                or key
+            )
+            if " - " in sf_name:
+                sf_name = sf_name.split(" - ", 1)[-1]
+
+            # Letztes Analyse-Datum
+            dates = [r.get("analysiert_am", "") for r in rows if r.get("analysiert_am")]
+            last_date = max(dates) if dates else ""
+
+            self._table_data.append({
+                "key":       key,
+                "rows":      rows,
+                "name":      sf_name,
+                "umbrella":  umbrella_disp,
+                "total":     len(rows),
+                "pending":   n_pending,
+                "analyzed":  n_analyzed,
+                "status":    status,
+                "last_date": last_date,
+                "has_pdf":   has_pdf,
+            })
+
+        # Zusammenfassung
+        n_total   = len(self._table_data)
+        n_done    = sum(1 for d in self._table_data if d["status"] == "done")
+        n_pend    = sum(1 for d in self._table_data if d["status"] in ("pending", "partial"))
+        n_no_pdf  = sum(1 for d in self._table_data if d["status"] == "no_pdf")
+        self._summary_var.set(
+            f"Gesamt: {n_total}  |  ✓ {n_done}  |  ⏳ {n_pend}  |  — {n_no_pdf} (kein PDF)"
         )
 
-        # Umbrella-Dropdown befüllen
-        umbrella_labels = []
-        self._umbrella_label_map: dict[str, str] = {}
-        for uid, rows in sorted(self._umbrella_map.items(),
-                                 key=lambda x: x[0].lower()):
-            name = rows[0].get("fondsname", uid) if rows else uid
-            # Kürze auf ersten sinnvollen Teil
-            short = name.split(" - ")[0][:60] if " - " in name else name[:60]
-            label = f"{short} ({len(rows)} ISINs)"
-            umbrella_labels.append(label)
-            self._umbrella_label_map[label] = uid
+        self._fill_tree()
 
-        self._umbrella_cb.config(values=umbrella_labels)
-        if umbrella_labels:
-            self._umbrella_cb.set(umbrella_labels[0])
+    def _fill_tree(self):
+        self._tree.delete(*self._tree.get_children())
+        only_pending = self._filter_var.get()
 
-        # Subfonds-Dropdown befüllen
-        sf_labels = []
-        self._subfonds_label_map: dict[str, str] = {}
-        for sfid, rows in sorted(self._subfonds_map.items(),
-                                  key=lambda x: (x[1][0].get("subfonds_name") or x[0]).lower()):
-            name = rows[0].get("subfonds_name") or rows[0].get("fondsname") or sfid
-            short = name.split(" - ")[-1][:60]
-            label = f"{short} ({len(rows)} ISINs)"
-            sf_labels.append(label)
-            self._subfonds_label_map[label] = sfid
-
-        self._subfonds_cb.config(values=sf_labels)
-        if sf_labels:
-            self._subfonds_cb.set(sf_labels[0])
-
-    def _on_mode_change(self):
-        pass  # Dropdowns sind immer sichtbar; Radiobutton steuert Auswahl
-
-    # ─── Analyse starten ─────────────────────────────────────────────────────
-
-    def _build_groups_for_run(self) -> dict | None:
-        """Baut die groups-Dict je nach gewähltem Modus auf."""
-        mode = self._sel_mode.get()
-
-        if mode == "all":
-            queue_rows = results_store.get_analysis_queue()
-            if not queue_rows:
-                messagebox.showinfo(
-                    "Keine ISINs",
-                    "Alle ISINs mit Prospekt wurden bereits analysiert.",
-                    parent=self,
-                )
-                return None
-            # Gruppen aus Queue aufbauen
-            groups: dict = {}
-            for r in queue_rows:
-                key = r.get("subfonds_id") or f"__single_{r['isin']}"
-                groups.setdefault(key, []).append(r)
-            return groups
-
-        elif mode == "umbrella":
-            label = self._umbrella_var.get()
-            if not label:
-                messagebox.showwarning("Keine Auswahl", "Bitte einen Umbrella-Fonds auswählen.", parent=self)
-                return None
-            uid = self._umbrella_label_map.get(label)
-            if not uid:
-                return None
-            rows = self._umbrella_map.get(uid, [])
-            # Nur Subfonds mit PDF
-            groups = {}
-            for r in rows:
-                key = r.get("subfonds_id") or f"__single_{r['isin']}"
-                groups.setdefault(key, []).append(r)
-            valid_groups = {
-                k: v for k, v in groups.items()
-                if any(
-                    rr.get("prospekt_pfad") and Path(rr["prospekt_pfad"]).exists()
-                    for rr in v
-                )
-            }
-            if not valid_groups:
-                messagebox.showwarning(
-                    "Kein PDF",
-                    "Für diesen Umbrella-Fonds liegen keine PDFs vor.",
-                    parent=self,
-                )
-                return None
-            return valid_groups
-
-        elif mode == "subfonds":
-            label = self._subfonds_var.get()
-            if not label:
-                messagebox.showwarning("Keine Auswahl", "Bitte einen Subfonds auswählen.", parent=self)
-                return None
-            sfid = self._subfonds_label_map.get(label)
-            if not sfid:
-                return None
-            rows = self._subfonds_map.get(sfid, [])
-            return {sfid: rows} if rows else None
-
-        return None
-
-    def _build_prompt_with_taxonomy(self) -> str:
-        """Injiziert aktuelle Taxonomie-Werte in den Prompt-Template."""
-        fondstyp_liste  = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("fondstyp"))
-        anlegertyp_liste = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("anlegertyp"))
-        kundentyp_liste = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("kundentyp"))
-        return (
-            self._prompt
-            .replace("{fondstyp_liste}",   fondstyp_liste   or "  (keine Werte definiert)")
-            .replace("{anlegertyp_liste}",  anlegertyp_liste or "  (keine Werte definiert)")
-            .replace("{kundentyp_liste}",  kundentyp_liste  or "  (keine Werte definiert)")
+        # Sortierung: ausstehend zuerst, dann teilweise, dann analysiert, dann kein PDF
+        order = {"pending": 0, "partial": 1, "done": 2, "no_pdf": 3}
+        items = sorted(
+            self._table_data,
+            key=lambda d: (order[d["status"]], d["name"].lower()),
         )
 
-    def _open_typologie(self):
-        from typologie_window import TypologieWindow
-        TypologieWindow(self)
+        for item in items:
+            if only_pending and item["status"] not in ("pending", "partial"):
+                continue
+            pending_disp = str(item["pending"]) if item["has_pdf"] else "—"
+            date_disp    = item["last_date"][:16] if item["last_date"] else "—"
+            self._tree.insert("", "end", iid=item["key"], values=(
+                item["name"][:70],
+                item["umbrella"],
+                item["total"],
+                pending_disp,
+                _STATUS_TEXT[item["status"]],
+                date_disp,
+            ), tags=(item["status"],))
 
-    def _start_analysis(self):
+    def _sort_by(self, col: str):
+        items = [(self._tree.set(iid, col), iid)
+                 for iid in self._tree.get_children()]
+        items.sort(key=lambda x: x[0].lower())
+        for idx, (_, iid) in enumerate(items):
+            self._tree.move(iid, "", idx)
+
+    # ─── Analyse starten ──────────────────────────────────────────────────────
+
+    def _start_all_pending(self):
+        groups = {
+            d["key"]: d["rows"]
+            for d in self._table_data
+            if d["status"] in ("pending", "partial") and d["has_pdf"]
+        }
+        if not groups:
+            messagebox.showinfo(
+                "Alle analysiert",
+                "Alle Subfonds-Gruppen mit Prospekt wurden bereits analysiert.",
+                parent=self,
+            )
+            return
+        self._run_analysis(groups)
+
+    def _start_selected(self):
+        selected = self._tree.selection()
+        if not selected:
+            messagebox.showwarning(
+                "Keine Auswahl",
+                "Bitte mindestens eine Zeile in der Tabelle auswählen.",
+                parent=self,
+            )
+            return
+        groups: dict = {}
+        no_pdf_names: list[str] = []
+        for key in selected:
+            item = next((d for d in self._table_data if d["key"] == key), None)
+            if item:
+                if item["has_pdf"]:
+                    groups[key] = item["rows"]
+                else:
+                    no_pdf_names.append(item["name"])
+        if not groups:
+            messagebox.showwarning(
+                "Kein PDF",
+                "Keine der ausgewählten Gruppen hat einen Prospekt:\n"
+                + ", ".join(no_pdf_names[:5]),
+                parent=self,
+            )
+            return
+        self._run_analysis(groups)
+
+    def _on_double_click(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        item = next((d for d in self._table_data if d["key"] == iid), None)
+        if not item:
+            return
+        if not item["has_pdf"]:
+            messagebox.showinfo(
+                "Kein PDF",
+                f"Für '{item['name']}' liegt kein Prospekt vor.",
+                parent=self,
+            )
+            return
+        self._run_analysis({iid: item["rows"]})
+
+    def _run_analysis(self, groups: dict):
         if self._worker and self._worker.is_alive():
             return
-
+        self._batch_errors = []
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
         if not api_key:
             messagebox.showerror(
@@ -452,11 +507,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 parent=self,
             )
             return
-
-        groups = self._build_groups_for_run()
-        if not groups:
-            return
-
         model = self._model_var.get()
         self._event_queue = queue.Queue()
         self._worker = LLMAnalysisWorker(
@@ -470,7 +520,9 @@ class ProspektAnalysisWindow(tk.Toplevel):
         self._set_running(True)
         self._status_var.set(f"0 / {len(groups)} Gruppen")
         self._prog_var.set(0)
-        self._log_line(f"Starte Analyse: {len(groups)} Subfonds-Gruppe(n), Modell: {model}")
+        self._log_line(
+            f"Starte Analyse: {len(groups)} Subfonds-Gruppe(n), Modell: {model}"
+        )
 
     def _stop_worker(self):
         if self._worker:
@@ -479,8 +531,72 @@ class ProspektAnalysisWindow(tk.Toplevel):
     def _set_running(self, running: bool):
         s_on  = "disabled" if running else "normal"
         s_off = "normal"   if running else "disabled"
-        self.btn_start.config(state=s_on)
+        self.btn_all.config(state=s_on)
+        self.btn_sel.config(state=s_on)
         self.btn_stop.config(state=s_off)
+
+    # ─── Prompt ───────────────────────────────────────────────────────────────
+
+    def _build_prompt_with_taxonomy(self) -> str:
+        fondstyp_liste   = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("fondstyp"))
+        anlegertyp_liste = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("anlegertyp"))
+        kundentyp_liste  = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("kundentyp"))
+        return (
+            self._prompt
+            .replace("{fondstyp_liste}",   fondstyp_liste   or "  (keine Werte definiert)")
+            .replace("{anlegertyp_liste}",  anlegertyp_liste or "  (keine Werte definiert)")
+            .replace("{kundentyp_liste}",  kundentyp_liste  or "  (keine Werte definiert)")
+        )
+
+    def _open_typologie(self):
+        from typologie_window import TypologieWindow
+        TypologieWindow(self)
+
+    def _open_prompt_editor(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("Prompt bearbeiten")
+        dlg.configure(bg=BG_MAIN)
+        dlg.geometry("800x600")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg,
+            text="LLM-Prompt (Platzhalter {isin_list} wird automatisch ersetzt)",
+            bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 9),
+        ).pack(fill="x", padx=12, pady=(8, 2))
+
+        txt = scrolledtext.ScrolledText(
+            dlg, bg=BG_INPUT, fg=FG_TEXT,
+            font=("Consolas", 9), insertbackground=FG_TEXT,
+            relief="flat", wrap="word",
+        )
+        txt.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        txt.insert("1.0", self._prompt)
+
+        btn_frame = tk.Frame(dlg, bg=BG_MAIN)
+        btn_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        def _save():
+            self._prompt = txt.get("1.0", "end-1c")
+            dlg.destroy()
+
+        def _reset():
+            txt.delete("1.0", "end")
+            txt.insert("1.0", DEFAULT_PROMPT)
+
+        tk.Button(btn_frame, text="Speichern", command=_save,
+                  bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
+                  font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+                  activebackground=BTN_ACTIVE).pack(side="left")
+        tk.Button(btn_frame, text="Zurücksetzen", command=_reset,
+                  bg=BTN_BG, fg=ACCENT_YELLOW, relief="flat",
+                  font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+                  activebackground=BTN_ACTIVE).pack(side="left", padx=(6, 0))
+        tk.Button(btn_frame, text="Abbrechen", command=dlg.destroy,
+                  bg=BTN_BG, fg=FG_MUTED, relief="flat",
+                  font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+                  activebackground=BTN_ACTIVE).pack(side="right")
 
     # ─── Queue-Polling ────────────────────────────────────────────────────────
 
@@ -510,75 +626,32 @@ class ProspektAnalysisWindow(tk.Toplevel):
         elif evt.type == "error":
             prefix = f"[{evt.isin}] " if evt.isin else ""
             self._log_line(f"✗ {prefix}{evt.message}")
+            self._batch_errors.append(f"[{evt.isin or '?'}] {evt.message}")
 
         elif evt.type == "done":
-            self._log_line(f"✅ {evt.message}")
+            self._log_line("─" * 60)
+            self._log_line(
+                f"✅  Fertig — Analysiert: {evt.done}  |  Fehler: {evt.failed}  |  Übersprungen: {evt.skipped}"
+            )
+            if self._batch_errors:
+                self._log_line("Fehlgeschlagene Gruppen:")
+                for err in self._batch_errors:
+                    self._log_line(f"  ✗ {err}")
             self._status_var.set(evt.message)
             self._prog_var.set(100)
             self._set_running(False)
             self._refresh_data()
+            if self._batch_errors:
+                messagebox.showwarning(
+                    "Batch abgeschlossen — mit Fehlern",
+                    f"Analysiert: {evt.done}  |  Fehler: {evt.failed}  |  Übersprungen: {evt.skipped}\n\n"
+                    + "\n".join(self._batch_errors[:20])
+                    + ("\n\n… und weitere" if len(self._batch_errors) > 20 else ""),
+                    parent=self,
+                )
 
     def _log_line(self, text: str):
         self._log.config(state="normal")
         self._log.insert("end", text + "\n")
         self._log.see("end")
         self._log.config(state="disabled")
-
-    # ─── Prompt-Editor ────────────────────────────────────────────────────────
-
-    def _open_prompt_editor(self):
-        dlg = tk.Toplevel(self)
-        dlg.title("Prompt bearbeiten")
-        dlg.configure(bg=BG_MAIN)
-        dlg.geometry("800x600")
-        dlg.transient(self)
-        dlg.grab_set()
-
-        tk.Label(
-            dlg,
-            text="LLM-Prompt (Platzhalter {isin_list} wird automatisch ersetzt)",
-            bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 9),
-        ).pack(fill="x", padx=12, pady=(8, 2))
-
-        txt = scrolledtext.ScrolledText(
-            dlg, bg=BG_INPUT, fg=FG_TEXT,
-            font=("Consolas", 9), insertbackground=FG_TEXT, relief="flat",
-            wrap="word",
-        )
-        txt.pack(fill="both", expand=True, padx=12, pady=(0, 4))
-        txt.insert("1.0", self._prompt)
-
-        btn_frame = tk.Frame(dlg, bg=BG_MAIN)
-        btn_frame.pack(fill="x", padx=12, pady=(0, 8))
-
-        def _save():
-            self._prompt = txt.get("1.0", "end-1c")
-            dlg.destroy()
-
-        def _reset():
-            txt.delete("1.0", "end")
-            txt.insert("1.0", DEFAULT_PROMPT)
-
-        tk.Button(
-            btn_frame, text="Speichern",
-            command=_save,
-            bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            activebackground=BTN_ACTIVE,
-        ).pack(side="left")
-
-        tk.Button(
-            btn_frame, text="Zurücksetzen",
-            command=_reset,
-            bg=BTN_BG, fg=ACCENT_YELLOW, relief="flat",
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            activebackground=BTN_ACTIVE,
-        ).pack(side="left", padx=(6, 0))
-
-        tk.Button(
-            btn_frame, text="Abbrechen",
-            command=dlg.destroy,
-            bg=BTN_BG, fg=FG_MUTED, relief="flat",
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            activebackground=BTN_ACTIVE,
-        ).pack(side="right")

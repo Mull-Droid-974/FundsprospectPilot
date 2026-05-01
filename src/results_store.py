@@ -200,18 +200,27 @@ def count() -> int:
 
 
 def get_stats() -> dict:
-    """Gibt Zählungen nach Segmentierung zurück."""
+    """Gibt Zählungen nach LLM-Segmentierung zurück (llm_segmentierung bevorzugt)."""
     init_db()
     with _connect() as con:
-        rows = con.execute(
-            "SELECT segmentierung, COUNT(*) AS n FROM fund_results GROUP BY segmentierung"
-        ).fetchall()
-    counts = {r["segmentierung"]: r["n"] for r in rows}
+        total = con.execute("SELECT COUNT(*) FROM fund_results").fetchone()[0]
+        rows = con.execute("""
+            SELECT
+                CASE
+                    WHEN llm_segmentierung != '' AND llm_segmentierung IS NOT NULL
+                        THEN llm_segmentierung
+                    ELSE segmentierung
+                END AS seg,
+                COUNT(*) AS n
+            FROM fund_results
+            GROUP BY seg
+        """).fetchall()
+    counts = {r["seg"]: r["n"] for r in rows}
     return {
-        "retail":        counts.get("retail", 0),
+        "retail":        counts.get("retail",        0),
         "institutional": counts.get("institutional", 0),
-        "unklar":        counts.get("unklar", 0),
-        "total":         sum(counts.values()),
+        "unklar":        counts.get("unklar",        0),
+        "total":         total,
     }
 
 
@@ -580,6 +589,21 @@ def update_llm_analysis(
             mindestanlage or "", mindestanlage_roh or "",
             modell or "", now, isin,
         ))
+
+
+def get_no_metadata_results() -> list[dict]:
+    """
+    Gibt ISINs zurück, für die kein Prospekt-URL ermittelt werden konnte —
+    d.h. Phase 1 hat keinen Treffer in der fundinfo-API geliefert.
+    """
+    init_db()
+    with _connect() as con:
+        rows = con.execute("""
+            SELECT * FROM fund_results
+            WHERE (prospekt_url = '' OR prospekt_url IS NULL)
+            ORDER BY fondsname, isin
+        """).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_analysis_queue() -> list[dict]:

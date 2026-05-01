@@ -168,7 +168,7 @@ class App(tk.Tk):
             self._stat_cards["unklar"].set(str(s.get("unklar", 0)))
         except Exception:
             pass
-        self.after(30_000, self._refresh_dashboard)
+        self.after(5_000, self._refresh_dashboard)
 
     def _build_log_panel(self, parent):
         header = tk.Frame(parent, bg=BG_MAIN)

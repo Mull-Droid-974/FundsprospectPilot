@@ -113,6 +113,14 @@ class ResultsWindow(tk.Toplevel):
         ).pack(side="right", padx=(4, 0))
 
         tk.Button(
+            inner, text="Ohne Metadaten exportieren",
+            command=self._export_no_metadata,
+            bg=BTN_BG, fg=ACCENT_YELLOW, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE,
+        ).pack(side="right", padx=(4, 0))
+
+        tk.Button(
             inner, text="Aktualisieren",
             command=self.refresh,
             bg=BTN_BG, fg=FG_TEXT, relief="flat",
@@ -295,6 +303,8 @@ class ResultsWindow(tk.Toplevel):
 
     def _show_detail(self, row: dict):
         win = tk.Toplevel(self)
+        win.transient(self)
+        win.grab_set()
         win.title(f"Detail — {row.get('isin', '')}  {row.get('fondsname', '')}")
         win.configure(bg=BG_MAIN)
         win.geometry("680x640")
@@ -460,6 +470,79 @@ class ResultsWindow(tk.Toplevel):
             messagebox.showinfo(
                 "Export erfolgreich",
                 f"{len(rows)} Einträge ({label}) gespeichert:\n{path}",
+                parent=self,
+            )
+        except Exception as e:
+            messagebox.showerror("Export fehlgeschlagen", str(e), parent=self)
+
+    def _export_no_metadata(self):
+        rows = results_store.get_no_metadata_results()
+        if not rows:
+            messagebox.showinfo(
+                "Keine Einträge",
+                "Alle ISINs in der Datenbank haben einen Prospekt-URL.",
+                parent=self,
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            defaultextension=".xlsx",
+            filetypes=[("Excel-Datei", "*.xlsx"), ("CSV-Datei", "*.csv")],
+            initialfile="isins_ohne_metadaten.xlsx",
+            title=f"ISINs ohne Metadaten exportieren ({len(rows)} Einträge)",
+        )
+        if not path:
+            return
+
+        _EXPORT_COLS = [
+            ("isin",                   "ISIN"),
+            ("fondsname",              "Fondsname"),
+            ("subfonds_name",          "Subfonds"),
+            ("anteilsklasse",          "Anteilsklasse"),
+            ("ausschuettungsart",      "Ausschüttung"),
+            ("fondswaehrung",          "Währung"),
+            ("erstellt_am",            "Importiert am"),
+            ("prospekt_nicht_gefunden","Prospekt-Suche (Datum)"),
+        ]
+
+        try:
+            if path.lower().endswith(".csv"):
+                import csv
+                with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f, delimiter=";")
+                    writer.writerow([h for _, h in _EXPORT_COLS])
+                    for row in rows:
+                        writer.writerow([row.get(k, "") or "" for k, _ in _EXPORT_COLS])
+            else:
+                import openpyxl
+                from openpyxl.styles import Alignment, Font, PatternFill
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Ohne Metadaten"
+
+                header_fill = PatternFill("solid", fgColor="2e2800")
+                header_font = Font(bold=True, color="f9e2af")
+                col_widths   = [18, 40, 35, 22, 14, 10, 18, 22]
+
+                for ci, (_, header) in enumerate(_EXPORT_COLS, start=1):
+                    cell = ws.cell(row=1, column=ci, value=header)
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center")
+                    ws.column_dimensions[
+                        openpyxl.utils.get_column_letter(ci)
+                    ].width = col_widths[ci - 1]
+
+                for ri, row in enumerate(rows, start=2):
+                    for ci, (key, _) in enumerate(_EXPORT_COLS, start=1):
+                        ws.cell(row=ri, column=ci, value=row.get(key, "") or "")
+
+                wb.save(path)
+
+            messagebox.showinfo(
+                "Export erfolgreich",
+                f"{len(rows)} ISINs ohne Metadaten gespeichert:\n{path}",
                 parent=self,
             )
         except Exception as e:

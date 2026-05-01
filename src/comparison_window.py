@@ -265,6 +265,9 @@ class _ComparisonWorker(threading.Thread):
                 ]}],
             )
 
+            if response.stop_reason == "max_tokens":
+                self._emit("log", "⚠ Ausgabe-Limit (max_tokens) erreicht — Antwort möglicherweise abgeschnitten.")
+
             raw = "".join(
                 block.text for block in response.content if hasattr(block, "text")
             )
@@ -281,9 +284,13 @@ class _ComparisonWorker(threading.Thread):
             self._emit("log", "✓ Analyse abgeschlossen")
 
         except anthropic.AuthenticationError:
-            self._emit("error", "Ungültiger API-Key.")
+            self._emit("error", "Ungültiger API-Key — bitte im Admin konfigurieren.")
         except anthropic.RateLimitError:
-            self._emit("error", "API Rate Limit erreicht — bitte kurz warten.")
+            self._emit("error", "Rate Limit erreicht — bitte kurz warten und erneut starten.")
+        except anthropic.BadRequestError as exc:
+            self._emit("error", f"Eingabe zu lang für Modell-Kontext — Dokumente reduzieren: {exc}")
+        except anthropic.APIStatusError as exc:
+            self._emit("error", f"API-Fehler {exc.status_code}: {exc.message}")
         except Exception as exc:
             self._emit("error", str(exc))
         finally:
