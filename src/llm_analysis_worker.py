@@ -10,6 +10,7 @@ import queue
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,6 +83,7 @@ class LLMAnalysisWorker(threading.Thread):
         api_key: str,
         event_queue: queue.Queue,
         delay: float = 0.5,
+        workers: int = 2,
     ):
         super().__init__(daemon=True)
         self._groups = groups
@@ -90,10 +92,12 @@ class LLMAnalysisWorker(threading.Thread):
         self._api_key = api_key
         self._queue = event_queue
         self._delay = delay
+        self._workers = max(1, workers)
         self._stop_flag = False
         self._done = 0
         self._failed = 0
         self._skipped = 0
+        self._lock = threading.Lock()
 
     def stop(self):
         self._stop_flag = True
@@ -233,84 +237,105 @@ class LLMAnalysisWorker(threading.Thread):
                 modell=model,
             )
 
+    def _process_one(self, group_key: str, group_rows: list[dict], total: int):
+        """Verarbeitet eine Subfonds-Gruppe — läuft in einem Thread-Pool-Worker."""
+        if self._stop_flag:
+            return
+
+        ref_isin = group_rows[0]["isin"] if group_rows else ""
+        ref_name = (
+            group_rows[0].get("subfonds_name") or
+            group_rows[0].get("fondsname") or
+            group_key
+        )
+
+        # PDF finden
+        pdf_path = next(
+            (r["prospekt_pfad"] for r in group_rows
+             if r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()),
+            None,
+        )
+        if not pdf_path:
+            with self._lock:
+                self._skipped += 1
+            self._emit("log", isin=ref_isin,
+                       message=f"Kein PDF vorhanden — übersprungen ({ref_name})",
+                       total=total)
+            return
+
+        self._emit("log", isin=ref_isin,
+                   message=f"Analysiere: {ref_name} ({len(group_rows)} ISINs) …",
+                   total=total)
+
+        # Text extrahieren
+        try:
+            pdf_text = extract_relevant_text(pdf_path) or ""
+            if not pdf_text:
+                raise ValueError("Kein Text extrahierbar")
+            tables = pdf_analyzer.load_tables_json(pdf_path)
+            if tables:
+                pdf_text = _format_tables_for_prompt(tables) + "\n\n" + pdf_text
+        except Exception as exc:
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin=ref_isin,
+                       message=f"PDF-Fehler: {exc}", total=total)
+            return
+
+        # LLM aufrufen
+        try:
+            parsed = self._call_llm(pdf_text, group_rows)
+            if not parsed:
+                raise ValueError("LLM-Antwort konnte nicht geparst werden")
+        except Exception as exc:
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin=ref_isin,
+                       message=f"LLM-Fehler: {exc}", total=total)
+            return
+
+        # Ergebnisse in DB schreiben
+        try:
+            self._match_and_save(parsed, group_rows, self._model)
+        except Exception as exc:
+            with self._lock:
+                self._failed += 1
+            self._emit("error", isin=ref_isin,
+                       message=f"DB-Fehler: {exc}", total=total)
+            return
+
+        with self._lock:
+            self._done += 1
+        seg_summary = parsed.get("fondstyp", "?")
+        self._emit("progress", isin=ref_isin,
+                   message=f"{ref_name} → {seg_summary} | {len(group_rows)} ISINs gesetzt",
+                   total=total)
+
     def run(self):
         try:
             total = len(self._groups)
-            self._emit("log", message=f"Starte LLM-Analyse für {total} Subfonds-Gruppe(n) …",
+            self._emit("log",
+                       message=f"Starte LLM-Analyse: {total} Gruppe(n), {self._workers} Worker …",
                        total=total)
 
-            for group_key, group_rows in self._groups.items():
-                if self._stop_flag:
-                    self._emit("log", message="Analyse abgebrochen.")
-                    break
+            with ThreadPoolExecutor(max_workers=self._workers) as executor:
+                futures = {
+                    executor.submit(self._process_one, key, rows, total): key
+                    for key, rows in self._groups.items()
+                }
+                for future in as_completed(futures):
+                    if self._stop_flag:
+                        for f in futures:
+                            f.cancel()
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        self._emit("error", message=f"Unerwarteter Fehler: {exc}")
 
-                ref_isin = group_rows[0]["isin"] if group_rows else ""
-                ref_name = (
-                    group_rows[0].get("subfonds_name") or
-                    group_rows[0].get("fondsname") or
-                    group_key
-                )
-
-                # PDF finden
-                pdf_path = next(
-                    (r["prospekt_pfad"] for r in group_rows
-                     if r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()),
-                    None,
-                )
-                if not pdf_path:
-                    self._skipped += 1
-                    self._emit("log", isin=ref_isin,
-                               message=f"Kein PDF vorhanden — übersprungen ({ref_name})",
-                               total=total)
-                    continue
-
-                self._emit("log", isin=ref_isin,
-                           message=f"Analysiere: {ref_name} ({len(group_rows)} ISINs) …",
-                           total=total)
-
-                # Text extrahieren
-                try:
-                    pdf_text = extract_relevant_text(pdf_path) or ""
-                    if not pdf_text:
-                        raise ValueError("Kein Text extrahierbar")
-                    # Strukturierte Tabellen voranstellen falls vorhanden
-                    tables = pdf_analyzer.load_tables_json(pdf_path)
-                    if tables:
-                        pdf_text = _format_tables_for_prompt(tables) + "\n\n" + pdf_text
-                except Exception as exc:
-                    self._failed += 1
-                    self._emit("error", isin=ref_isin,
-                               message=f"PDF-Fehler: {exc}", total=total)
-                    continue
-
-                # LLM aufrufen
-                try:
-                    parsed = self._call_llm(pdf_text, group_rows)
-                    if not parsed:
-                        raise ValueError("LLM-Antwort konnte nicht geparst werden")
-                except Exception as exc:
-                    self._failed += 1
-                    self._emit("error", isin=ref_isin,
-                               message=f"LLM-Fehler: {exc}", total=total)
-                    continue
-
-                # Ergebnisse in DB schreiben
-                try:
-                    self._match_and_save(parsed, group_rows, self._model)
-                except Exception as exc:
-                    self._failed += 1
-                    self._emit("error", isin=ref_isin,
-                               message=f"DB-Fehler: {exc}", total=total)
-                    continue
-
-                self._done += 1
-                seg_summary = parsed.get("fondstyp", "?")
-                self._emit("progress", isin=ref_isin,
-                           message=f"{ref_name} → {seg_summary} | {len(group_rows)} ISINs gesetzt",
-                           total=total)
-
+            stopped = self._stop_flag
             self._emit("done", message=(
-                f"Fertig. Analysiert: {self._done}, "
+                ("Abgebrochen. " if stopped else "Fertig. ") +
+                f"Analysiert: {self._done}, "
                 f"Übersprungen: {self._skipped}, Fehler: {self._failed}"
             ))
         except Exception as exc:

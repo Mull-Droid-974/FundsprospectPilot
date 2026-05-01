@@ -209,6 +209,19 @@ class ProspektAnalysisWindow(tk.Toplevel):
             font=("Segoe UI", 9),
         ).pack(side="right")
 
+        tk.Label(
+            inner, text="Worker:",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
+        ).pack(side="right", padx=(16, 4))
+
+        self._workers_var = tk.IntVar(value=2)
+        tk.Spinbox(
+            inner, from_=1, to=4, textvariable=self._workers_var,
+            width=3, font=("Segoe UI", 9),
+            bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT,
+            buttonbackground=BTN_BG, relief="flat",
+        ).pack(side="right")
+
     def _build_table_area(self):
         # ── Aktionszeile ──────────────────────────────────────────────────────
         ctrl = tk.Frame(self, bg=BG_MAIN)
@@ -515,6 +528,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
             model=model,
             api_key=api_key,
             event_queue=self._event_queue,
+            workers=self._workers_var.get(),
         )
         self._worker.start()
         self._set_running(True)
