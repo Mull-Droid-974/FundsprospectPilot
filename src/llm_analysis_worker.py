@@ -10,6 +10,7 @@ import queue
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,14 @@ import pdf_analyzer
 import results_store
 from pdf_analyzer import extract_relevant_text
 from utils import logger
+
+
+_RATE_LIMIT_WAIT_SEC  = 2 * 3600   # 2 Stunden warten bei Rate Limit
+_RATE_LIMIT_MAX_RETRIES = 3
+
+
+class _RateLimitRetry(Exception):
+    """Internes Signal: Rate Limit — Retry nach Wartezeit."""
 
 
 def _format_tables_for_prompt(tables: list[dict]) -> str:
@@ -144,7 +153,7 @@ class LLMAnalysisWorker(threading.Thread):
         except anthropic.AuthenticationError:
             raise RuntimeError("Ungültiger API-Key — bitte im Admin konfigurieren.")
         except anthropic.RateLimitError:
-            raise RuntimeError("Rate Limit erreicht — bitte kurz warten und Batch neu starten.")
+            raise _RateLimitRetry()
         except anthropic.BadRequestError as exc:
             raise RuntimeError(f"Eingabe zu lang für Modell-Kontext — Prospekt kürzen: {exc}")
         except anthropic.APIStatusError as exc:
@@ -237,6 +246,23 @@ class LLMAnalysisWorker(threading.Thread):
                 modell=model,
             )
 
+    def _wait_interruptible(self, seconds: int, ref_isin: str, total: int) -> bool:
+        """Schläft in 60s-Schritten; gibt False zurück wenn stop_flag gesetzt.
+        Alle 10 Minuten erscheint ein Countdown-Log-Eintrag."""
+        waited = 0
+        while waited < seconds:
+            if self._stop_flag:
+                self._emit("log", isin=ref_isin,
+                           message="Warten abgebrochen.", total=total)
+                return False
+            time.sleep(60)
+            waited += 60
+            remaining = (seconds - waited) // 60
+            if remaining > 0 and waited % 600 == 0:
+                self._emit("log", isin=ref_isin,
+                           message=f"⏳ Noch {remaining} min bis Retry …", total=total)
+        return True
+
     def _process_one(self, group_key: str, group_rows: list[dict], total: int):
         """Verarbeitet eine Subfonds-Gruppe — läuft in einem Thread-Pool-Worker."""
         if self._stop_flag:
@@ -282,16 +308,42 @@ class LLMAnalysisWorker(threading.Thread):
                        message=f"PDF-Fehler: {exc}", total=total)
             return
 
-        # LLM aufrufen
-        try:
-            parsed = self._call_llm(pdf_text, group_rows)
-            if not parsed:
-                raise ValueError("LLM-Antwort konnte nicht geparst werden")
-        except Exception as exc:
+        # LLM aufrufen — mit automatischem Retry bei Rate Limit
+        parsed = None
+        for attempt in range(1, _RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                parsed = self._call_llm(pdf_text, group_rows)
+                break
+            except _RateLimitRetry:
+                if attempt == _RATE_LIMIT_MAX_RETRIES:
+                    with self._lock:
+                        self._failed += 1
+                    self._emit("error", isin=ref_isin,
+                               message=f"Rate Limit nach {attempt} Versuchen — Gruppe übersprungen",
+                               total=total)
+                    return
+                h = _RATE_LIMIT_WAIT_SEC // 3600
+                self._emit("log", isin=ref_isin,
+                           message=(f"⏳ Rate Limit — warte {h}h "
+                                    f"(Versuch {attempt}/{_RATE_LIMIT_MAX_RETRIES}) …"),
+                           total=total)
+                if not self._wait_interruptible(_RATE_LIMIT_WAIT_SEC, ref_isin, total):
+                    return
+                self._emit("log", isin=ref_isin,
+                           message=f"🔄 Retry Versuch {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} …",
+                           total=total)
+            except Exception as exc:
+                with self._lock:
+                    self._failed += 1
+                self._emit("error", isin=ref_isin,
+                           message=f"LLM-Fehler: {exc}", total=total)
+                return
+
+        if not parsed:
             with self._lock:
                 self._failed += 1
             self._emit("error", isin=ref_isin,
-                       message=f"LLM-Fehler: {exc}", total=total)
+                       message="LLM-Antwort konnte nicht geparst werden", total=total)
             return
 
         # Ergebnisse in DB schreiben
