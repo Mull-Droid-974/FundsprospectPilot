@@ -15,6 +15,7 @@ import os
 import queue
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 import tkinter as tk
@@ -170,7 +171,7 @@ class _TrimWorker(threading.Thread):
 # ─── Batch-Worker ────────────────────────────────────────────────────────────
 
 class _BatchTrimWorker(threading.Thread):
-    """Kürzt alle übergebenen PDFs sequentiell per LLM und speichert auto."""
+    """Kürzt alle übergebenen PDFs parallel per LLM und speichert auto."""
 
     def __init__(
         self,
@@ -179,6 +180,7 @@ class _BatchTrimWorker(threading.Thread):
         model: str,
         api_key: str,
         result_queue: queue.Queue,
+        workers: int = 2,
     ):
         super().__init__(daemon=True)
         self._pdf_paths = pdf_paths
@@ -187,6 +189,9 @@ class _BatchTrimWorker(threading.Thread):
         self._api_key = api_key
         self._queue = result_queue
         self._stop_flag = False
+        self._workers = max(1, workers)
+        self._done = 0
+        self._lock = threading.Lock()
 
     def stop(self):
         self._stop_flag = True
@@ -194,84 +199,98 @@ class _BatchTrimWorker(threading.Thread):
     def _emit(self, evt_type: str, payload):
         self._queue.put((evt_type, payload))
 
+    def _process_one(self, pdf_path: str, total: int):
+        if self._stop_flag:
+            return
+        name = Path(pdf_path).name
+        try:
+            tables = pdf_analyzer.extract_tables_from_pdf(pdf_path)
+            pdf_analyzer.save_tables_json(pdf_path, tables)
+
+            full_text = pdf_analyzer.extract_text_from_pdf(pdf_path) or ""
+            if not full_text:
+                self._emit("log", f"  ⚠ {name}: Kein Text extrahierbar — übersprungen")
+                with self._lock:
+                    done = self._done
+                self._emit("batch_progress", (done, total, pdf_path))
+                return
+
+            client = anthropic.Anthropic(api_key=self._api_key)
+            try:
+                response = client.messages.create(
+                    model=self._model,
+                    max_tokens=8192,
+                    system=[{"type": "text", "text": self._prompt,
+                             "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": full_text[:80_000],
+                         "cache_control": {"type": "ephemeral"}},
+                    ]}],
+                )
+            except anthropic.AuthenticationError:
+                self._emit("log", f"✗ {name}: Ungültiger API-Key — Batch abgebrochen.")
+                self._stop_flag = True
+                return
+            except anthropic.RateLimitError:
+                self._emit("log", f"  ✗ {name}: Rate Limit — übersprungen.")
+                with self._lock:
+                    done = self._done
+                self._emit("batch_progress", (done, total, pdf_path))
+                return
+            except anthropic.BadRequestError as exc:
+                self._emit("log", f"  ✗ {name}: Eingabe zu lang — {exc}")
+                with self._lock:
+                    done = self._done
+                self._emit("batch_progress", (done, total, pdf_path))
+                return
+            except anthropic.APIStatusError as exc:
+                self._emit("log", f"  ✗ {name}: API-Fehler {exc.status_code} — {exc.message}")
+                with self._lock:
+                    done = self._done
+                self._emit("batch_progress", (done, total, pdf_path))
+                return
+
+            if response.stop_reason == "max_tokens":
+                self._emit("log", f"  ⚠ {name}: Ausgabe-Limit (max_tokens) — möglicherweise abgeschnitten.")
+
+            trimmed = "".join(
+                block.text for block in response.content if hasattr(block, "text")
+            )
+            out = Path(pdf_path).with_suffix(".trimmed.txt")
+            out.write_text(trimmed, encoding="utf-8")
+
+            reduction = 100 - int(len(trimmed) / max(len(full_text), 1) * 100)
+            with self._lock:
+                self._done += 1
+                done = self._done
+            self._emit("log", f"  ✓ {name}: {len(full_text):,} → {len(trimmed):,} Zeichen (−{reduction}%)")
+
+        except Exception as exc:
+            self._emit("log", f"  ✗ {name}: Fehler: {exc}")
+            with self._lock:
+                done = self._done
+
+        self._emit("batch_progress", (done, total, pdf_path))
+
     def run(self):
         total = len(self._pdf_paths)
-        done = 0
+        self._emit("log", f"Batch gestartet: {total} PDF(s), {self._workers} Worker …")
 
-        self._emit("log", f"Batch gestartet: {total} PDF(s) ohne .trimmed.txt")
-
-        client = anthropic.Anthropic(api_key=self._api_key)
-
-        for pdf_path in self._pdf_paths:
-            if self._stop_flag:
-                self._emit("log", f"Abgebrochen nach {done}/{total}")
-                break
-
-            name = Path(pdf_path).name
-            self._emit("log", f"[{done + 1}/{total}] {name}")
-
-            try:
-                # Tabellen extrahieren
-                tables = pdf_analyzer.extract_tables_from_pdf(pdf_path)
-                pdf_analyzer.save_tables_json(pdf_path, tables)
-
-                # Volltext
-                full_text = pdf_analyzer.extract_text_from_pdf(pdf_path) or ""
-                if not full_text:
-                    self._emit("log", "  ⚠ Kein Text extrahierbar — übersprungen")
-                    self._emit("batch_progress", (done + 1, total, pdf_path))
-                    continue
-
-                # LLM
+        with ThreadPoolExecutor(max_workers=self._workers) as executor:
+            futures = {
+                executor.submit(self._process_one, pdf_path, total): pdf_path
+                for pdf_path in self._pdf_paths
+            }
+            for future in as_completed(futures):
+                if self._stop_flag:
+                    for f in futures:
+                        f.cancel()
                 try:
-                    response = client.messages.create(
-                        model=self._model,
-                        max_tokens=8192,
-                        system=[{"type": "text", "text": self._prompt,
-                                 "cache_control": {"type": "ephemeral"}}],
-                        messages=[{"role": "user", "content": [
-                            {"type": "text", "text": full_text[:80_000],
-                             "cache_control": {"type": "ephemeral"}},
-                        ]}],
-                    )
-                except anthropic.AuthenticationError:
-                    self._emit("log", "✗ Ungültiger API-Key — Batch abgebrochen.")
-                    break
-                except anthropic.RateLimitError:
-                    self._emit("log", f"  ✗ Rate Limit erreicht — {Path(pdf_path).name} übersprungen.")
-                    self._emit("batch_progress", (done, total, pdf_path))
-                    continue
-                except anthropic.BadRequestError as exc:
-                    self._emit("log", f"  ✗ Eingabe zu lang (Context): {Path(pdf_path).name} — {exc}")
-                    self._emit("batch_progress", (done, total, pdf_path))
-                    continue
-                except anthropic.APIStatusError as exc:
-                    self._emit("log", f"  ✗ API-Fehler {exc.status_code}: {Path(pdf_path).name} — {exc.message}")
-                    self._emit("batch_progress", (done, total, pdf_path))
-                    continue
+                    future.result()
+                except Exception as exc:
+                    self._emit("log", f"  ✗ Unerwarteter Fehler: {exc}")
 
-                if response.stop_reason == "max_tokens":
-                    self._emit("log", f"  ⚠ {Path(pdf_path).name}: Ausgabe-Limit (max_tokens) — Text möglicherweise abgeschnitten.")
-
-                trimmed = "".join(
-                    block.text for block in response.content if hasattr(block, "text")
-                )
-
-                # Auto-speichern
-                out = Path(pdf_path).with_suffix(".trimmed.txt")
-                out.write_text(trimmed, encoding="utf-8")
-
-                reduction = 100 - int(len(trimmed) / max(len(full_text), 1) * 100)
-                self._emit("log",
-                    f"  ✓ {len(full_text):,} → {len(trimmed):,} Zeichen (−{reduction}%)")
-                done += 1
-
-            except Exception as exc:
-                self._emit("log", f"  ✗ Fehler: {exc}")
-
-            self._emit("batch_progress", (done, total, pdf_path))
-
-        self._emit("batch_done", done)
+        self._emit("batch_done", self._done)
 
 
 # ─── Fenster ─────────────────────────────────────────────────────────────────
@@ -346,6 +365,15 @@ class PdfTrimWindow(tk.Toplevel):
             state="readonly", width=28, font=("Segoe UI", 9),
         ).pack(side="right", padx=(2, 0))
         tk.Label(inner, text="Modell:", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 9)).pack(side="right", padx=(8, 2))
+
+        self._workers_var = tk.IntVar(value=2)
+        tk.Spinbox(
+            inner, from_=1, to=4, textvariable=self._workers_var,
+            width=3, bg=BG_INPUT, fg=FG_TEXT, font=("Segoe UI", 9),
+            buttonbackground=BTN_BG, relief="flat",
+        ).pack(side="right", padx=(2, 0))
+        tk.Label(inner, text="Worker:", bg=BG_PANEL, fg=FG_MUTED,
                  font=("Segoe UI", 9)).pack(side="right", padx=(8, 2))
 
         # Hauptbereich
@@ -531,8 +559,20 @@ class PdfTrimWindow(tk.Toplevel):
             self._tab_label.config(text="Tabellen: noch nicht extrahiert")
 
     def _load_preview_bg(self, pdf_path: str):
-        text = pdf_analyzer.extract_text_from_pdf(pdf_path) or "(Kein Text extrahierbar)"
-        self._set_preview(f"[Original — {len(text):,} Zeichen]\n\n{text}")
+        meta = pdf_analyzer.get_pdf_metadata(pdf_path)
+        size_mb = Path(pdf_path).stat().st_size / 1_048_576
+        pages = meta.get("pages", "?")
+        title = meta.get("title") or ""
+        lines = [
+            f"Datei:  {Path(pdf_path).name}",
+            f"Größe:  {size_mb:.1f} MB",
+            f"Seiten: {pages}",
+        ]
+        if title:
+            lines.append(f"Titel:  {title}")
+        lines.append("")
+        lines.append("Volltext erst beim ▶ Verarbeiten extrahiert.")
+        self._set_preview("\n".join(lines))
 
     def _set_preview(self, text: str):
         self._preview.config(state="normal")
@@ -650,6 +690,7 @@ class PdfTrimWindow(tk.Toplevel):
             model=self._model_var.get(),
             api_key=api_key,
             result_queue=self._event_queue,
+            workers=self._workers_var.get(),
         )
         self._worker.start()
         self._set_running(True)
@@ -663,6 +704,8 @@ class PdfTrimWindow(tk.Toplevel):
         self._btn_run.config(state=state)
         self._btn_batch.config(state=state)
         self._btn_stop.config(state="normal" if running else "disabled")
+        if hasattr(self.master, "notify_process"):
+            self.master.notify_process("PDF-Kürzer", running)
 
     # ─── Queue-Polling ────────────────────────────────────────────────────────
 
@@ -717,7 +760,6 @@ class PdfTrimWindow(tk.Toplevel):
     def _discard_trimmed(self):
         self._pending_trimmed = ""
         self._confirm_frame.pack_forget()
-        self._set_preview("[Verworfen — Original wird geladen …]")
         threading.Thread(
             target=self._load_preview_bg, args=(self._selected_pdf,), daemon=True
         ).start()

@@ -13,6 +13,8 @@ except ImportError:
 from utils import logger, extract_relevant_sections
 
 
+_MAX_PAGES = 150
+
 _RELEVANT_TABLE_KEYWORDS = {
     "isin", "wkn", "valor",
     "mindestanlage", "minimum", "zeichnung", "subscription",
@@ -72,8 +74,12 @@ def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
         with pdfplumber.open(str(pdf_path)) as pdf:
             total_pages = len(pdf.pages)
             logger.info(f"PDF geöffnet: {pdf_path.name} ({total_pages} Seiten)")
+            if total_pages > _MAX_PAGES:
+                logger.warning(
+                    f"PDF hat {total_pages} Seiten — nur erste {_MAX_PAGES} werden verarbeitet: {pdf_path.name}"
+                )
 
-            for i, page in enumerate(pdf.pages):
+            for i, page in enumerate(pdf.pages[:_MAX_PAGES]):
                 try:
                     page_text = page.extract_text()
                     if page_text and page_text.strip():
@@ -140,7 +146,7 @@ def extract_tables_from_pdf(pdf_path: str) -> list[dict]:
     tables = []
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
+            for page_num, page in enumerate(pdf.pages[:_MAX_PAGES], 1):
                 for raw in page.extract_tables() or []:
                     if not raw or len(raw) < 2:
                         continue

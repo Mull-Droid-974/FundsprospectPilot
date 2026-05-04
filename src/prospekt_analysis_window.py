@@ -182,6 +182,14 @@ class ProspektAnalysisWindow(tk.Toplevel):
         self.btn_stop.pack(side="right", padx=(4, 0))
 
         tk.Button(
+            inner, text="⚠ Grosse PDFs zurücksetzen",
+            command=self._reset_large_pdfs,
+            bg="#2e1a00", fg=ACCENT_YELLOW, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE,
+        ).pack(side="right", padx=(4, 0))
+
+        tk.Button(
             inner, text="✏  Prompt",
             command=self._open_prompt_editor,
             bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
@@ -542,12 +550,50 @@ class ProspektAnalysisWindow(tk.Toplevel):
         if self._worker:
             self._worker.stop()
 
+    def _reset_large_pdfs(self):
+        import pdf_analyzer
+        from tkinter import messagebox
+        candidates = []
+        for row in results_store.get_all_results():
+            if not row.get("llm_segmentierung"):
+                continue
+            pdf_path = row.get("prospekt_pfad") or ""
+            if not pdf_path or not Path(pdf_path).exists():
+                continue
+            if Path(pdf_path).with_suffix(".trimmed.txt").exists():
+                continue
+            pages = pdf_analyzer.get_pdf_metadata(pdf_path).get("pages", 0)
+            if pages > pdf_analyzer._MAX_PAGES:
+                candidates.append(row["isin"])
+
+        if not candidates:
+            messagebox.showinfo(
+                "Keine Treffer",
+                "Keine analysierten ISINs mit grossem PDF (ohne .trimmed.txt) gefunden.",
+                parent=self,
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Zurücksetzen bestätigen",
+            f"{len(candidates)} ISIN(s) gefunden deren PDF > {pdf_analyzer._MAX_PAGES} Seiten hat "
+            f"und noch kein .trimmed.txt besitzt.\n\nAnalyseergebnisse zurücksetzen?",
+            parent=self,
+        ):
+            return
+
+        results_store.reset_llm_analysis(candidates)
+        self._log_line(f"↺ {len(candidates)} ISIN(s) zurückgesetzt — bitte PDF-Kürzer verwenden, dann erneut analysieren.")
+        self._refresh_data()
+
     def _set_running(self, running: bool):
         s_on  = "disabled" if running else "normal"
         s_off = "normal"   if running else "disabled"
         self.btn_all.config(state=s_on)
         self.btn_sel.config(state=s_on)
         self.btn_stop.config(state=s_off)
+        if hasattr(self.master, "notify_process"):
+            self.master.notify_process("Analyse", running)
 
     # ─── Prompt ───────────────────────────────────────────────────────────────
 
@@ -636,6 +682,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
                     f"{evt.done + evt.failed + evt.skipped}/{evt.total}  "
                     f"✓{evt.done}  ✗{evt.failed}  ⟳{evt.skipped}"
                 )
+            self._refresh_data()
 
         elif evt.type == "error":
             prefix = f"[{evt.isin}] " if evt.isin else ""

@@ -591,6 +591,23 @@ def update_llm_analysis(
         ))
 
 
+def reset_llm_analysis(isins: list[str]) -> int:
+    """Setzt LLM-Analyseergebnisse für die angegebenen ISINs zurück. Gibt Anzahl zurück."""
+    if not isins:
+        return 0
+    with _connect() as con:
+        con.executemany("""
+            UPDATE fund_results SET
+                fondstyp = '', anlegertyp = '', kundentyp = '',
+                llm_segmentierung = '', llm_segmentierung_begruendung = '',
+                fondstyp_roh = '', anlegertyp_roh = '', kundentyp_roh = '',
+                mindestanlage = '', mindestanlage_roh = '',
+                modell = '', analysiert_am = ''
+            WHERE isin = ?
+        """, [(isin,) for isin in isins])
+    return len(isins)
+
+
 def get_no_metadata_results() -> list[dict]:
     """
     Gibt ISINs zurück, für die kein Prospekt-URL ermittelt werden konnte —

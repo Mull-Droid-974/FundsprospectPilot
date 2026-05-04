@@ -335,6 +335,8 @@ class DownloadWindow(tk.Toplevel):
         self.btn_phase2.config(state=state_on)
         self.btn_single.config(state=state_on)
         self.btn_stop.config(state=state_off)
+        if hasattr(self.master, "notify_process"):
+            self.master.notify_process("Download", running)
 
     # ─── Queue-Polling ────────────────────────────────────────────────────────
 

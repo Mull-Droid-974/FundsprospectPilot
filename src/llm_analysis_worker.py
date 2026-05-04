@@ -27,6 +27,7 @@ from utils import logger
 
 _RATE_LIMIT_WAIT_SEC  = 2 * 3600   # 2 Stunden warten bei Rate Limit
 _RATE_LIMIT_MAX_RETRIES = 6
+_MAX_PDF_SIZE_MB = 30              # PDFs über diesem Limit werden übersprungen
 
 
 class _RateLimitRetry(Exception):
@@ -288,6 +289,30 @@ class LLMAnalysisWorker(threading.Thread):
                        message=f"Kein PDF vorhanden — übersprungen ({ref_name})",
                        total=total)
             return
+
+        size_mb = Path(pdf_path).stat().st_size / 1_048_576
+        if size_mb > _MAX_PDF_SIZE_MB:
+            with self._lock:
+                self._skipped += 1
+            self._emit("log", isin=ref_isin,
+                       message=f"PDF zu groß ({size_mb:.1f} MB > {_MAX_PDF_SIZE_MB} MB) — übersprungen ({ref_name})",
+                       total=total)
+            return
+
+        # Große PDFs ohne .trimmed.txt ablehnen — Analyse wäre unvollständig
+        trimmed_path = Path(pdf_path).with_suffix(".trimmed.txt")
+        if not trimmed_path.exists():
+            pages = pdf_analyzer.get_pdf_metadata(pdf_path).get("pages", 0)
+            if pages > pdf_analyzer._MAX_PAGES:
+                with self._lock:
+                    self._skipped += 1
+                self._emit("log", isin=ref_isin,
+                           message=(
+                               f"PDF hat {pages} Seiten — bitte zuerst PDF-Kürzer verwenden, "
+                               f"dann erneut analysieren ({ref_name})"
+                           ),
+                           total=total)
+                return
 
         self._emit("log", isin=ref_isin,
                    message=f"Analysiere: {ref_name} ({len(group_rows)} ISINs) …",

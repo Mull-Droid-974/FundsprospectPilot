@@ -50,6 +50,9 @@ class App(tk.Tk):
         self._current_isin_var = tk.StringVar(value="—")
         self._current_step_var = tk.StringVar(value="Bereit")
 
+        # Laufende Sub-Prozesse (Name → True)
+        self._running_processes: set[str] = set()
+
         # Event queue (for background workers reporting back)
         self._progress_queue = queue.Queue()
 
@@ -277,6 +280,21 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(200, self._poll_queue)
+
+    # ─── Sub-Prozess-Status ──────────────────────────────────────────
+
+    def notify_process(self, name: str, running: bool):
+        """Sub-Fenster melden Start/Ende ihres Prozesses für die Statusleiste."""
+        if running:
+            self._running_processes.add(name)
+        else:
+            self._running_processes.discard(name)
+
+        if self._running_processes:
+            names = " · ".join(sorted(self._running_processes))
+            self.status_var.set(f"⚙  Läuft: {names} …")
+        else:
+            self.status_var.set("Bereit")
 
     # ─── Ergebnis-DB ─────────────────────────────────────────────────
 

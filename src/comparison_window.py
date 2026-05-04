@@ -1010,6 +1010,8 @@ class ComparisonWindow(tk.Toplevel):
         state = "disabled" if running else "normal"
         self._btn_start.config(state=state)
         self._btn_stop.config(state="normal" if running else "disabled")
+        if hasattr(self.master, "notify_process"):
+            self.master.notify_process("Vergleich", running)
 
     # ─── Queue-Polling ────────────────────────────────────────────────────────
 
