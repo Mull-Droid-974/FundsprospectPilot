@@ -20,7 +20,7 @@ import requests
 from utils import logger, build_pdf_filename, get_next_pdf_number
 
 # Profile-Reihenfolge bei Fallback
-PROFILES = ["CH-prof", "CH-pub", "DE-prof", "LU-prof", "AT-prof"]
+PROFILES = ["CH-prof", "CH-pub", "DE-prof", "LU-prof", "AT-prof", "FR-prof", "IT-prof", "NL-prof", "GB-prof"]
 
 # Sprach-Präferenz für Prospekte
 LANG_PREFERENCE = ["DE", "EN", "FR", "IT", "ES"]
@@ -181,6 +181,97 @@ def _download_pdf(
         if save_path.exists():
             save_path.unlink()
         return None
+
+
+def _is_valid_isin(val: str) -> bool:
+    v = val.strip()
+    return len(v) == 12 and v[:2].isalpha() and v[2:].isalnum()
+
+
+def _extract_isin_from_item(item: dict) -> str:
+    """Extrahiert die ISIN aus einem fundinfo Data-Item (R- oder S-Dict)."""
+    r = item.get("R") or {}
+    s = item.get("S") or {}
+    # Bekannte Feldnamen im R-Dict
+    for key in ("ISIN", "Isin", "isin", "Isin_Code", "IsinCode"):
+        val = str(r.get(key) or "").strip()
+        if _is_valid_isin(val):
+            return val.upper()
+    # Bekannte Feldnamen im S-Dict
+    for field in ("OFST000001", "OFST010001", "OFST000100"):
+        val = str(s.get(field) or "").strip()
+        if _is_valid_isin(val):
+            return val.upper()
+    # Fallback: alle S-Werte die ISIN-Format erfüllen
+    for val in s.values():
+        if isinstance(val, str) and _is_valid_isin(val):
+            return val.strip().upper()
+    return ""
+
+
+def fetch_subfonds_isins(
+    subfonds_name: str,
+    umbrella_id: str,
+    profile: str,
+    delay: float = 0.5,
+) -> list[dict]:
+    """
+    Holt alle Anteilsklassen (ISINs) eines Subfonds von fundinfo.
+
+    Abfrage per subfonds_name → filtert nach umbrella_id und exaktem subfonds_name.
+    Gibt eine Liste von Metadaten-Dicts zurück (gleiche Struktur wie fetch_fund_metadata).
+    """
+    if not subfonds_name or subfonds_name == "—":
+        return []
+    session = _get_session()
+    time.sleep(delay)
+    api_url = f"https://www.fundinfo.com/en/{profile}/LandingPage/Data"
+    params = {"skip": 0, "take": 200, "query": subfonds_name, "orderdirection": "desc"}
+    try:
+        resp = session.get(api_url, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("Data", [])
+    except Exception as exc:
+        logger.debug(f"fetch_subfonds_isins Fehler ({profile}): {exc}")
+        return []
+
+    results = []
+    for item in items:
+        s = item.get("S") or {}
+        item_umbrella = (s.get("OFST900000") or "").strip()
+        item_sf_name  = (s.get("OFST900016") or "").strip()
+
+        # Nur ISINs desselben Umbrella und Subfonds
+        if umbrella_id and umbrella_id != "—" and item_umbrella != umbrella_id:
+            continue
+        if item_sf_name != subfonds_name:
+            continue
+
+        isin = _extract_isin_from_item(item)
+        if not isin:
+            continue
+
+        doc_info = _best_doc_from_list(item.get("D", {}).get("PR", []))
+        results.append({
+            "isin":                   isin,
+            "subfonds_id":            s.get("OFST900017", ""),
+            "subfonds_name":          item_sf_name,
+            "umbrella_id":            item_umbrella,
+            "anteilsklasse":          s.get("OFST020050", ""),
+            "ausschuettungsart":      s.get("OFST020400", ""),
+            "fondswaehrung":          s.get("OFST010410", ""),
+            "fundinfo_ter":           s.get("OFST452000", ""),
+            "subfonds_code":          s.get("OFST900171", ""),
+            "fundinfo_investor_type": s.get("OFST900267", ""),
+            "ongoing_charges_datum":  s.get("OFST452110", ""),
+            "qualif_anleger_ch":      s.get("OFST6030CH", ""),
+            "institutional_ch":       s.get("OFST6031CH", ""),
+            "prospekt_url":           doc_info["url"] if doc_info else "",
+            "prospekt_lang":          doc_info.get("language", "") if doc_info else "",
+            "profile":                profile,
+        })
+    return results
 
 
 def fetch_fund_metadata(isin: str, delay: float = 1.0) -> Optional[dict]:

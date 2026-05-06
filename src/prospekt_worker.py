@@ -47,6 +47,8 @@ class ProspektWorker(threading.Thread):
         single_mode: bool = False,  # True = nur diese ISINs, keine Gruppen-Erweiterung
         parallel: int = 4,          # Anzahl paralleler Download-Threads (Phase 2)
         meta_parallel: int = 4,     # Anzahl paralleler Metadaten-Threads (Phase 1)
+        phase1_only: bool = False,   # Nur Metadaten laden, kein PDF-Download
+        force_reload: bool = False,  # Metadaten auch für ISINs mit vorhandenen Daten überschreiben
     ):
         super().__init__(daemon=True)
         self._isins = isins
@@ -57,6 +59,8 @@ class ProspektWorker(threading.Thread):
         self._single_mode = single_mode
         self._parallel = parallel
         self._meta_parallel = meta_parallel
+        self._phase1_only = phase1_only
+        self._force_reload = force_reload
         self._stop_flag = False
         self._lock = threading.Lock()
         self._url_lock = threading.Lock()   # schützt _active_urls
@@ -112,6 +116,7 @@ class ProspektWorker(threading.Thread):
                     ongoing_charges_datum=meta.get("ongoing_charges_datum", ""),
                     qualif_anleger_ch=meta.get("qualif_anleger_ch", ""),
                     institutional_ch=meta.get("institutional_ch", ""),
+                    force=self._force_reload,
                 )
             except Exception as exc:
                 with self._lock:
@@ -120,14 +125,58 @@ class ProspektWorker(threading.Thread):
                 return
             with self._lock:
                 self._done += 1
+            sf_name = meta.get("subfonds_name") or ""
             self._emit("progress", isin,
-                f"Unterfonds: {meta['subfonds_name'] or '—'}", total=total)
+                f"Unterfonds: {sf_name or '—'}", total=total)
+
+            # Alle Anteilsklassen desselben Subfonds entdecken und in DB eintragen
+            if sf_name and meta.get("profile"):
+                self._discover_subfonds_siblings(isin, meta)
         else:
             with self._lock:
                 self._failed += 1
             self._emit("error", isin, "Keine Daten von fundinfo", total=total)
             results_store.mark_meta_not_found(isin)
             results_store.mark_prospekt_nicht_gefunden(isin)
+
+    def _discover_subfonds_siblings(self, source_isin: str, meta: dict):
+        """
+        Fragt fundinfo nach allen Anteilsklassen desselben Subfonds ab
+        und legt unbekannte ISINs automatisch in der DB an.
+        """
+        sf_name    = meta.get("subfonds_name", "")
+        umbrella   = meta.get("umbrella_id", "")
+        profile    = meta.get("profile", "")
+        discovered = fundinfo_client.fetch_subfonds_isins(sf_name, umbrella, profile, delay=0.3)
+        new_count  = 0
+        for row in discovered:
+            sibling_isin = row.get("isin", "")
+            if not sibling_isin or sibling_isin == source_isin:
+                continue
+            # In DB anlegen (nur wenn noch nicht vorhanden) und Metadaten setzen
+            try:
+                results_store.import_base_set([{"isin": sibling_isin}])
+                results_store.update_fundinfo_meta(
+                    sibling_isin,
+                    subfonds_id=row.get("subfonds_id", ""),
+                    subfonds_name=row.get("subfonds_name", ""),
+                    umbrella_id=row.get("umbrella_id", ""),
+                    anteilsklasse=row.get("anteilsklasse", ""),
+                    ausschuettungsart=row.get("ausschuettungsart", ""),
+                    fondswaehrung=row.get("fondswaehrung", ""),
+                    fundinfo_ter=row.get("fundinfo_ter", ""),
+                    prospekt_url=row.get("prospekt_url", ""),
+                    fundinfo_investor_type=row.get("fundinfo_investor_type", ""),
+                    ongoing_charges_datum=row.get("ongoing_charges_datum", ""),
+                    qualif_anleger_ch=row.get("qualif_anleger_ch", ""),
+                    institutional_ch=row.get("institutional_ch", ""),
+                )
+                new_count += 1
+            except Exception as exc:
+                self._emit("log", source_isin, f"  Fehler beim Anlegen {sibling_isin}: {exc}")
+        if new_count:
+            self._emit("log", source_isin,
+                f"  → {new_count} neue Anteilsklasse(n) im Subfonds '{sf_name}' entdeckt und angelegt")
 
     def _load_metadata(self, isins_without_meta: list[dict]):
         self._phase = 1
@@ -341,9 +390,13 @@ class ProspektWorker(threading.Thread):
             results_store.cleanup_sentinels()
             target_isins = {r["isin"] for r in self._isins}
 
-            # Phase 1: ISINs ohne subfonds_id mit Metadaten befüllen
-            # ISINs mit Sentinel (__nf_*) haben nicht-leere subfonds_id → werden korrekt ausgeschlossen
-            without_meta = [r for r in self._isins if not r.get("subfonds_id")]
+            # Phase 1: Metadaten laden
+            # force_reload=True → alle ISINs; sonst nur ISINs ohne subfonds_id
+            if self._force_reload:
+                without_meta = self._isins
+            else:
+                without_meta = [r for r in self._isins if not r.get("subfonds_id")
+                                or str(r.get("subfonds_id", "")).startswith("__")]
             if without_meta:
                 self._load_metadata(without_meta)
                 if self._stop_flag:
@@ -354,7 +407,13 @@ class ProspektWorker(threading.Thread):
                     results_store.get_result(r["isin"]) or r for r in self._isins
                 ]
 
-            # Phase 2: Gruppierter Download
+            # Phase 2: Gruppierter Download (überspringen wenn phase1_only)
+            if self._phase1_only:
+                self._emit("done", message=(
+                    f"Metadaten fertig. Geladen: {self._done}, Fehler: {self._failed}"
+                ))
+                return
+
             self._download_groups(target_isins)
 
             self._emit("done", message=(

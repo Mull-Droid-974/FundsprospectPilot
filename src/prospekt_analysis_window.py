@@ -208,14 +208,29 @@ class ProspektAnalysisWindow(tk.Toplevel):
         tk.Label(
             inner, text="Modell:",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
-        ).pack(side="right", padx=(16, 4))
+        ).pack(side="right", padx=(8, 4))
 
         self._model_var = tk.StringVar(value=MODELS[0])
-        ttk.Combobox(
+        self._model_combo = ttk.Combobox(
             inner, textvariable=self._model_var,
-            values=MODELS, state="readonly", width=26,
+            values=MODELS, state="readonly", width=28,
             font=("Segoe UI", 9),
-        ).pack(side="right")
+        )
+        self._model_combo.pack(side="right")
+
+        tk.Label(
+            inner, text="Anbieter:",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
+        ).pack(side="right", padx=(16, 4))
+
+        self._provider_var = tk.StringVar(value="anthropic")
+        provider_combo = ttk.Combobox(
+            inner, textvariable=self._provider_var,
+            values=["anthropic", "gemini"], state="readonly", width=10,
+            font=("Segoe UI", 9),
+        )
+        provider_combo.pack(side="right")
+        provider_combo.bind("<<ComboboxSelected>>", self._on_provider_changed)
 
         tk.Label(
             inner, text="Worker:",
@@ -229,6 +244,13 @@ class ProspektAnalysisWindow(tk.Toplevel):
             bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT,
             buttonbackground=BTN_BG, relief="flat",
         ).pack(side="right")
+
+    def _on_provider_changed(self, _event=None):
+        from llm_provider import get_models, get_default_batch_model
+        provider = self._provider_var.get()
+        models = get_models(provider)
+        self._model_combo.config(values=models)
+        self._model_var.set(get_default_batch_model(provider) if models else "")
 
     def _build_table_area(self):
         # ── Aktionszeile ──────────────────────────────────────────────────────
@@ -519,11 +541,17 @@ class ProspektAnalysisWindow(tk.Toplevel):
         if self._worker and self._worker.is_alive():
             return
         self._batch_errors = []
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        provider = self._provider_var.get()
+        if provider == "gemini":
+            api_key = os.getenv("GOOGLE_API_KEY", "")
+            key_label = "GOOGLE_API_KEY"
+        else:
+            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            key_label = "ANTHROPIC_API_KEY"
         if not api_key:
             messagebox.showerror(
                 "API-Key fehlt",
-                "Kein ANTHROPIC_API_KEY in .env gefunden.\n"
+                f"Kein {key_label} in .env gefunden.\n"
                 "Bitte im Admin-Bereich konfigurieren.",
                 parent=self,
             )
@@ -537,6 +565,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
             api_key=api_key,
             event_queue=self._event_queue,
             workers=self._workers_var.get(),
+            provider=provider,
         )
         self._worker.start()
         self._set_running(True)

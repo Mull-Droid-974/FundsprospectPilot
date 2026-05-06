@@ -68,6 +68,14 @@ def init_db():
             )
         """)
         # Migration: neue Spalten zu bestehenden DBs hinzufügen
+        # Eindeutigen Index sicherstellen — schützt auch bestehende DBs ohne PRIMARY KEY
+        try:
+            con.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_fund_results_isin ON fund_results(isin)"
+            )
+        except Exception:
+            pass
+
         for col_def in [
             "begruendung TEXT DEFAULT ''",
             "erstellt_am TEXT DEFAULT ''",
@@ -346,12 +354,20 @@ _SEG_NORMALIZE = {
 }
 
 
+_IMPORTABLE_FIELDS = frozenset({
+    "isin", "fund_id", "fondsname", "pruef_segmentierung",
+    "subfonds_name", "umbrella_id", "anteilsklasse",
+    "ausschuettungsart", "fondswaehrung", "ter",
+    "qualif_anleger_ch", "institutional_ch",
+})
+
+
 def import_base_set(rows: list[dict]) -> tuple[int, int]:
     """
-    Importiert ISINs als Grundmenge — bestehende ISINs werden NICHT überschrieben.
+    Importiert ISINs als Grundmenge.
 
-    rows: Liste von Dicts mit den Schlüsseln:
-          isin, fund_id, fondsname, pruef_segmentierung
+    rows: Liste von Dicts. Erlaubte Schlüssel: alle aus _IMPORTABLE_FIELDS.
+          Bestehende ISINs werden mit den gelieferten Feldern aktualisiert.
 
     Returns:
         (n_imported, n_skipped)
@@ -367,41 +383,41 @@ def import_base_set(rows: list[dict]) -> tuple[int, int]:
             if not isin:
                 continue
 
-            raw_seg = (row.get("pruef_segmentierung") or "").strip().lower()
-            pruef_seg = _SEG_NORMALIZE.get(raw_seg, raw_seg)
+            # Nur erlaubte Felder; pruef_segmentierung normalisieren
+            clean: dict[str, str] = {"isin": isin}
+            for field in _IMPORTABLE_FIELDS - {"isin"}:
+                val = (row.get(field) or "").strip()
+                if not val:
+                    continue
+                if field == "pruef_segmentierung":
+                    val = _SEG_NORMALIZE.get(val.lower(), val)
+                clean[field] = val
 
-            existing = con.execute(
-                "SELECT isin FROM fund_results WHERE isin = ?", (isin,)
-            ).fetchone()
+            # UPDATE-first: kein SELECT nötig, rowcount entscheidet
+            update_fields = {k: v for k, v in clean.items() if k != "isin"}
+            if update_fields:
+                set_clause = ", ".join(f"{k} = ?" for k in update_fields)
+                cur = con.execute(
+                    f"UPDATE fund_results SET {set_clause} WHERE isin = ?",
+                    (*update_fields.values(), isin),
+                )
+                if cur.rowcount > 0:
+                    skipped += 1
+                    continue
 
-            if existing:
-                # FundID, Fondsname und Prüfsegment immer überschreiben
-                con.execute("""
-                    UPDATE fund_results
-                    SET fund_id             = ?,
-                        fondsname           = ?,
-                        pruef_segmentierung = ?
-                    WHERE isin = ?
-                """, (
-                    (row.get("fund_id") or "").strip(),
-                    (row.get("fondsname") or "").strip(),
-                    pruef_seg,
-                    isin,
-                ))
-                skipped += 1
-            else:
-                con.execute("""
-                    INSERT INTO fund_results
-                        (isin, fund_id, fondsname, pruef_segmentierung, erstellt_am)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    isin,
-                    (row.get("fund_id") or "").strip(),
-                    (row.get("fondsname") or "").strip(),
-                    pruef_seg,
-                    now,
-                ))
+            # Kein Treffer beim UPDATE → neu einfügen
+            cols = list(clean.keys()) + ["erstellt_am"]
+            vals = list(clean.values()) + [now]
+            placeholders = ", ".join("?" for _ in cols)
+            try:
+                con.execute(
+                    f"INSERT INTO fund_results ({', '.join(cols)}) VALUES ({placeholders})",
+                    vals,
+                )
                 imported += 1
+            except sqlite3.IntegrityError:
+                # Unique-Konflikt durch Race/Edge-case → als Update zählen
+                skipped += 1
 
     return imported, skipped
 
@@ -437,6 +453,29 @@ def mark_prospekt_nicht_gefunden(isin: str):
             "UPDATE fund_results SET prospekt_nicht_gefunden = ? WHERE isin = ?",
             (now, isin),
         )
+
+
+def reset_not_found(isins: list[str] | None = None) -> int:
+    """
+    Setzt 'nicht gefunden'-Markierungen zurück damit ISINs erneut abgefragt werden.
+    isins=None → alle zurücksetzen, sonst nur die angegebenen ISINs.
+    Gibt Anzahl zurückgesetzter Einträge zurück.
+    """
+    with _connect() as con:
+        if isins is None:
+            cur = con.execute(
+                "UPDATE fund_results SET subfonds_id = '', prospekt_nicht_gefunden = '' "
+                "WHERE subfonds_id LIKE '__nf_%' OR prospekt_nicht_gefunden != ''"
+            )
+        else:
+            placeholders = ",".join("?" * len(isins))
+            cur = con.execute(
+                f"UPDATE fund_results SET subfonds_id = '', prospekt_nicht_gefunden = '' "
+                f"WHERE isin IN ({placeholders}) "
+                f"AND (subfonds_id LIKE '__nf_%' OR prospekt_nicht_gefunden != '')",
+                isins,
+            )
+    return cur.rowcount
 
 
 def get_by_prospekt_url(url: str) -> Optional[dict]:
@@ -486,12 +525,41 @@ def update_fundinfo_meta(
     ongoing_charges_datum: str = "",
     qualif_anleger_ch: str = "",
     institutional_ch: str = "",
+    force: bool = False,
 ):
-    """Speichert fundinfo-Metadaten für eine ISIN. Überschreibt nur leere Felder."""
+    """
+    Speichert fundinfo-Metadaten für eine ISIN.
+    force=False: nur leere Felder werden befüllt.
+    force=True:  alle Felder werden überschrieben.
+    """
     if not isin:
         return
-    with _connect() as con:
-        con.execute("""
+    vals = (
+        subfonds_id, subfonds_name, umbrella_id,
+        anteilsklasse, ausschuettungsart, fondswaehrung,
+        fundinfo_ter, prospekt_url, fundinfo_investor_type,
+        ongoing_charges_datum, qualif_anleger_ch, institutional_ch,
+        isin,
+    )
+    if force:
+        sql = """
+            UPDATE fund_results SET
+                subfonds_id            = ?,
+                subfonds_name          = ?,
+                umbrella_id            = ?,
+                anteilsklasse          = ?,
+                ausschuettungsart      = ?,
+                fondswaehrung          = ?,
+                fundinfo_ter           = ?,
+                prospekt_url           = ?,
+                fundinfo_investor_type = ?,
+                ongoing_charges_datum  = ?,
+                qualif_anleger_ch      = ?,
+                institutional_ch       = ?
+            WHERE isin = ?
+        """
+    else:
+        sql = """
             UPDATE fund_results SET
                 subfonds_id            = CASE WHEN subfonds_id            = '' OR subfonds_id            IS NULL THEN ? ELSE subfonds_id            END,
                 subfonds_name          = CASE WHEN subfonds_name          = '' OR subfonds_name          IS NULL THEN ? ELSE subfonds_name          END,
@@ -506,13 +574,9 @@ def update_fundinfo_meta(
                 qualif_anleger_ch      = CASE WHEN qualif_anleger_ch      = '' OR qualif_anleger_ch      IS NULL THEN ? ELSE qualif_anleger_ch      END,
                 institutional_ch       = CASE WHEN institutional_ch       = '' OR institutional_ch       IS NULL THEN ? ELSE institutional_ch       END
             WHERE isin = ?
-        """, (
-            subfonds_id, subfonds_name, umbrella_id,
-            anteilsklasse, ausschuettungsart, fondswaehrung,
-            fundinfo_ter, prospekt_url, fundinfo_investor_type,
-            ongoing_charges_datum, qualif_anleger_ch, institutional_ch,
-            isin,
-        ))
+        """
+    with _connect() as con:
+        con.execute(sql, vals)
 
 
 def get_subfonds_groups() -> dict:
@@ -528,6 +592,13 @@ def get_subfonds_groups() -> dict:
         key = row.get("subfonds_id") or ""
         groups.setdefault(key, []).append(row)
     return groups
+
+
+def get_meta_queue() -> list[dict]:
+    """Gibt alle ISINs zurück, für die noch keine fundinfo-Metadaten vorliegen (subfonds_id leer)."""
+    init_db()
+    rows = get_all_results()
+    return [r for r in rows if not r.get("subfonds_id")]
 
 
 def get_prospekt_queue(skip_nicht_gefunden: bool = False) -> list[dict]:
@@ -606,6 +677,14 @@ def reset_llm_analysis(isins: list[str]) -> int:
             WHERE isin = ?
         """, [(isin,) for isin in isins])
     return len(isins)
+
+
+def delete_all_results() -> int:
+    """Löscht alle Einträge aus fund_results. Gibt Anzahl gelöschter Zeilen zurück."""
+    with _connect() as con:
+        n = con.execute("SELECT COUNT(*) FROM fund_results").fetchone()[0]
+        con.execute("DELETE FROM fund_results")
+    return n
 
 
 def get_no_metadata_results() -> list[dict]:

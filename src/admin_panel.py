@@ -38,7 +38,7 @@ class AdminPanel(tk.Toplevel):
         super().__init__(parent)
         self.title("Admin-Einstellungen")
         self.configure(bg=BG_MAIN)
-        self.geometry("520x680")
+        self.geometry("540x460")
         self.resizable(False, False)
         self.grab_set()
 
@@ -46,14 +46,16 @@ class AdminPanel(tk.Toplevel):
         self._build_ui()
         self._load()
 
+    # ─── Helpers ─────────────────────────────────────────────────────────────
+
     def _section(self, parent, title: str) -> tk.Frame:
         tk.Label(
             parent, text=title, bg=BG_MAIN, fg=ACCENT_BLUE,
             font=("Segoe UI", 10, "bold"), anchor="w"
-        ).pack(fill="x", padx=20, pady=(14, 2))
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=20)
+        ).pack(fill="x", padx=16, pady=(14, 2))
+        ttk.Separator(parent, orient="horizontal").pack(fill="x", padx=16)
         f = tk.Frame(parent, bg=BG_PANEL)
-        f.pack(fill="x", padx=20, pady=(0, 4))
+        f.pack(fill="x", padx=16, pady=(0, 4))
         return f
 
     def _field(self, parent, label: str, var: tk.StringVar,
@@ -61,11 +63,11 @@ class AdminPanel(tk.Toplevel):
         parent.columnconfigure(1, weight=1)
         tk.Label(parent, text=label, bg=BG_PANEL, fg=FG_MUTED,
                  font=("Segoe UI", 9), anchor="w"
-                 ).grid(row=row, column=0, sticky="w", padx=12, pady=4)
+                 ).grid(row=row, column=0, sticky="w", padx=12, pady=5)
         e = tk.Entry(parent, textvariable=var, bg=BG_INPUT, fg=FG_TEXT,
                      insertbackground=FG_TEXT, font=("Segoe UI", 9),
                      relief="flat", bd=4, show=show)
-        e.grid(row=row, column=1, sticky="ew", padx=(4, 12), pady=4)
+        e.grid(row=row, column=1, sticky="ew", padx=(4, 12), pady=5)
         return e
 
     def _combo(self, parent, label: str, var: tk.StringVar,
@@ -73,80 +75,110 @@ class AdminPanel(tk.Toplevel):
         parent.columnconfigure(1, weight=1)
         tk.Label(parent, text=label, bg=BG_PANEL, fg=FG_MUTED,
                  font=("Segoe UI", 9), anchor="w"
-                 ).grid(row=row, column=0, sticky="w", padx=12, pady=4)
+                 ).grid(row=row, column=0, sticky="w", padx=12, pady=5)
         cb = ttk.Combobox(parent, textvariable=var, values=values,
                           state="readonly", font=("Segoe UI", 9))
-        cb.grid(row=row, column=1, sticky="ew", padx=(4, 12), pady=4)
+        cb.grid(row=row, column=1, sticky="ew", padx=(4, 12), pady=5)
         return cb
 
-    def _build_ui(self):
-        # ── Datei-Konfiguration ───────────────────────────────────────
-        file_frame = self._section(self, "Datei-Konfiguration")
-        file_frame.columnconfigure(1, weight=1)
-        self.var_excel = tk.StringVar()
-        self.var_pdf_folder = tk.StringVar()
-
-        self._field(file_frame, "Excel-Datei:", self.var_excel, 0)
-        tk.Button(
-            file_frame, text="...", command=self._browse_excel,
-            bg=BTN_BG, fg=FG_TEXT, relief="flat",
-            font=("Segoe UI", 8), padx=6, cursor="hand2"
-        ).grid(row=0, column=2, padx=(4, 0), pady=4)
-
-        self._field(file_frame, "PDF-Ordner:", self.var_pdf_folder, 1)
-        tk.Button(
-            file_frame, text="...", command=self._browse_pdf_folder,
-            bg=BTN_BG, fg=FG_TEXT, relief="flat",
-            font=("Segoe UI", 8), padx=6, cursor="hand2"
-        ).grid(row=1, column=2, padx=(4, 0), pady=4)
-
-        # ── API ───────────────────────────────────────────────────────
-        api_frame = self._section(self, "API-Konfiguration")
-        self.var_key = tk.StringVar()
-        key_entry = self._field(api_frame, "API-Key:", self.var_key, 0, show="*")
-
-        btn_row = tk.Frame(api_frame, bg=BG_PANEL)
-        btn_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 6))
+    def _key_btn_row(self, parent, key_entry, show_cmd, validate_cmd, grid_row: int = 1):
+        """Gemeinsame Zeile: Anzeigen/Verbergen + Key testen + Status."""
+        row_frame = tk.Frame(parent, bg=BG_PANEL)
+        row_frame.grid(row=grid_row, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 8))
 
         tk.Button(
-            btn_row, text="🔑  Anzeigen / Verbergen",
-            command=lambda: key_entry.config(
-                show="" if key_entry.cget("show") else "*"
-            ),
+            row_frame, text="🔑  Anzeigen / Verbergen",
+            command=show_cmd,
             bg=BTN_BG, fg=FG_MUTED, relief="flat",
             font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
         ).pack(side="left")
 
-        self.validate_btn = tk.Button(
-            btn_row, text="✔  Key testen",
-            command=self._validate_key,
+        btn = tk.Button(
+            row_frame, text="✔  Key testen",
+            command=validate_cmd,
             bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
             font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
         )
-        self.validate_btn.pack(side="left", padx=(6, 0))
+        btn.pack(side="left", padx=(6, 0))
 
-        self.key_status = tk.Label(
-            btn_row, text="", bg=BG_PANEL,
-            font=("Segoe UI", 8)
+        status = tk.Label(row_frame, text="", bg=BG_PANEL, font=("Segoe UI", 8))
+        status.pack(side="left", padx=(8, 0))
+        return btn, status
+
+    # ─── Tab-Bau ──────────────────────────────────────────────────────────────
+
+    def _build_tab_dateien(self, parent):
+        frame = self._section(parent, "Datei-Konfiguration")
+        frame.columnconfigure(1, weight=1)
+        self.var_excel = tk.StringVar()
+        self.var_pdf_folder = tk.StringVar()
+
+        self._field(frame, "Excel-Datei:", self.var_excel, 0)
+        tk.Button(
+            frame, text="...", command=self._browse_excel,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 8), padx=6, cursor="hand2"
+        ).grid(row=0, column=2, padx=(4, 8), pady=5)
+
+        self._field(frame, "PDF-Ordner:", self.var_pdf_folder, 1)
+        tk.Button(
+            frame, text="...", command=self._browse_pdf_folder,
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 8), padx=6, cursor="hand2"
+        ).grid(row=1, column=2, padx=(4, 8), pady=5)
+
+    def _build_tab_anthropic(self, parent):
+        api_frame = self._section(parent, "API-Key (Anthropic)")
+        api_frame.columnconfigure(1, weight=1)
+        self.var_key = tk.StringVar()
+        key_entry = self._field(api_frame, "API-Key:", self.var_key, 0, show="*")
+        self.validate_btn, self.key_status = self._key_btn_row(
+            api_frame, key_entry,
+            show_cmd=lambda: key_entry.config(show="" if key_entry.cget("show") else "*"),
+            validate_cmd=self._validate_key,
+            grid_row=1,
         )
-        self.key_status.pack(side="left", padx=(8, 0))
 
-        # ── Modelle ───────────────────────────────────────────────────
-        model_frame = self._section(self, "Modell-Konfiguration")
+        model_frame = self._section(parent, "Modelle")
         self.var_batch_model = tk.StringVar()
         self.var_single_model = tk.StringVar()
         self._combo(model_frame, "Batch-Modell:", self.var_batch_model, BATCH_MODELS, 0)
         self._combo(model_frame, "Einzel-Modell:", self.var_single_model, SINGLE_MODELS, 1)
-
-        # Kosten-Hinweis
         tk.Label(
             model_frame,
             text="Haiku = günstig/schnell  |  Sonnet = ausgewogen  |  Opus = präzise/teuer",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8)
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
-        # ── Verarbeitung ──────────────────────────────────────────────
-        proc_frame = self._section(self, "Verarbeitungs-Einstellungen")
+    def _build_tab_gemini(self, parent):
+        from llm_provider import MODELS as LLM_MODELS
+
+        api_frame = self._section(parent, "API-Key (Google Gemini)")
+        api_frame.columnconfigure(1, weight=1)
+        self.var_gemini_key = tk.StringVar()
+        gemini_key_entry = self._field(api_frame, "API-Key:", self.var_gemini_key, 0, show="*")
+        self.validate_gemini_btn, self.gemini_key_status = self._key_btn_row(
+            api_frame, gemini_key_entry,
+            show_cmd=lambda: gemini_key_entry.config(
+                show="" if gemini_key_entry.cget("show") else "*"
+            ),
+            validate_cmd=self._validate_gemini_key,
+            grid_row=1,
+        )
+
+        model_frame = self._section(parent, "Modelle")
+        self.var_gemini_batch = tk.StringVar()
+        self.var_gemini_single = tk.StringVar()
+        self._combo(model_frame, "Batch-Modell:", self.var_gemini_batch, LLM_MODELS["gemini"], 0)
+        self._combo(model_frame, "Einzel-Modell:", self.var_gemini_single, LLM_MODELS["gemini"], 1)
+        tk.Label(
+            model_frame,
+            text="Flash = günstig/schnell  |  Pro = ausgewogen/präzise",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8)
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
+    def _build_tab_system(self, parent):
+        proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
         self.var_batch_size = tk.StringVar()
         self.var_delay = tk.StringVar()
         self.var_retries = tk.StringVar()
@@ -154,16 +186,13 @@ class AdminPanel(tk.Toplevel):
         self._field(proc_frame, "Verzögerung (s):", self.var_delay, 1)
         self._field(proc_frame, "Max. Wiederholungen:", self.var_retries, 2)
 
-        # ── System-Info ───────────────────────────────────────────────
-        info_frame = self._section(self, "System-Info")
+        db_frame = self._section(parent, "Datenbank")
         db_path = Path(__file__).parent.parent / "data" / "output" / "results.db"
-
         try:
             import results_store
             stats = results_store.get_stats()
             db_info = (
-                f"DB: {db_path.name}  |  "
-                f"Einträge: {stats['total']}  |  "
+                f"DB: {db_path.name}  |  Einträge: {stats['total']}  |  "
                 f"Retail: {stats['retail']}  |  "
                 f"Institutional: {stats['institutional']}  |  "
                 f"Unklar: {stats['unklar']}"
@@ -172,14 +201,47 @@ class AdminPanel(tk.Toplevel):
             db_info = f"DB: {db_path}"
 
         tk.Label(
-            info_frame, text=db_info,
+            db_frame, text=db_info,
             bg=BG_PANEL, fg=FG_MUTED,
             font=("Segoe UI", 8), anchor="w", wraplength=460, justify="left"
-        ).pack(fill="x", padx=12, pady=6)
+        ).pack(fill="x", padx=12, pady=(8, 4))
 
-        # ── Buttons ───────────────────────────────────────────────────
+        tk.Button(
+            db_frame, text="🗑  Alle Daten löschen",
+            command=self._delete_all_data,
+            bg="#2e0000", fg=ACCENT_RED, relief="flat",
+            font=("Segoe UI", 9), padx=8, pady=4, cursor="hand2"
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    # ─── Haupt-UI ─────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TNotebook", background=BG_MAIN, borderwidth=0, tabmargins=[0, 0, 0, 0])
+        style.configure("TNotebook.Tab",
+                        background=BG_PANEL, foreground=FG_MUTED,
+                        padding=[14, 7], font=("Segoe UI", 9))
+        style.map("TNotebook.Tab",
+                  background=[("selected", BG_INPUT)],
+                  foreground=[("selected", ACCENT_BLUE)])
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+
+        tabs = [
+            ("📁  Dateien",   self._build_tab_dateien),
+            ("🔑  Anthropic", self._build_tab_anthropic),
+            ("🤖  Gemini",    self._build_tab_gemini),
+            ("⚙  System",    self._build_tab_system),
+        ]
+        for label, builder in tabs:
+            tab = tk.Frame(nb, bg=BG_MAIN)
+            nb.add(tab, text=label)
+            builder(tab)
+
         btn_bar = tk.Frame(self, bg=BG_MAIN)
-        btn_bar.pack(fill="x", padx=20, pady=16)
+        btn_bar.pack(fill="x", padx=16, pady=(4, 12))
 
         tk.Button(
             btn_bar, text="  Speichern  ",
@@ -194,6 +256,8 @@ class AdminPanel(tk.Toplevel):
             bg=BTN_BG, fg=FG_MUTED, relief="flat",
             font=("Segoe UI", 10), padx=14, pady=6, cursor="hand2"
         ).pack(side="right", padx=(0, 8))
+
+    # ─── Aktionen ─────────────────────────────────────────────────────────────
 
     def _browse_excel(self):
         path = filedialog.askopenfilename(
@@ -213,15 +277,15 @@ class AdminPanel(tk.Toplevel):
         self.var_excel.set(os.getenv("EXCEL_PATH", "data/input/fonds_universe.xlsx"))
         self.var_pdf_folder.set(os.getenv("PDF_FOLDER", "data/prospectus"))
         self.var_key.set(os.getenv("ANTHROPIC_API_KEY", ""))
-        self.var_batch_model.set(
-            os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001")
-        )
-        self.var_single_model.set(
-            os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6")
-        )
+        self.var_batch_model.set(os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001"))
+        self.var_single_model.set(os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6"))
         self.var_batch_size.set(os.getenv("BATCH_SIZE", "200"))
         self.var_delay.set(os.getenv("REQUEST_DELAY", "1.5"))
         self.var_retries.set(os.getenv("MAX_RETRIES", "3"))
+        self.var_gemini_key.set(os.getenv("GOOGLE_API_KEY", ""))
+        from llm_provider import DEFAULT_BATCH_MODELS, DEFAULT_SINGLE_MODELS
+        self.var_gemini_batch.set(os.getenv("GEMINI_BATCH_MODEL", DEFAULT_BATCH_MODELS["gemini"]))
+        self.var_gemini_single.set(os.getenv("GEMINI_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["gemini"]))
 
     def _validate_key(self):
         key = self.var_key.get().strip()
@@ -243,10 +307,54 @@ class AdminPanel(tk.Toplevel):
 
     def _on_validate_done(self, ok: bool):
         self.validate_btn.config(state="normal")
-        if ok:
-            self.key_status.config(text="✔ Gültig", fg=ACCENT_GREEN)
-        else:
-            self.key_status.config(text="✘ Ungültig", fg=ACCENT_RED)
+        self.key_status.config(
+            text="✔ Gültig" if ok else "✘ Ungültig",
+            fg=ACCENT_GREEN if ok else ACCENT_RED,
+        )
+
+    def _validate_gemini_key(self):
+        key = self.var_gemini_key.get().strip()
+        if not key:
+            self.gemini_key_status.config(text="Kein Key eingegeben", fg=ACCENT_YELLOW)
+            return
+        self.gemini_key_status.config(text="Wird geprüft...", fg=FG_MUTED)
+        self.validate_gemini_btn.config(state="disabled")
+
+        def check():
+            try:
+                from llm_provider import validate_key
+                ok, _ = validate_key(key, "gemini")
+            except Exception:
+                ok = False
+            self.after(0, lambda: self._on_gemini_validate_done(ok))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _on_gemini_validate_done(self, ok: bool):
+        self.validate_gemini_btn.config(state="normal")
+        self.gemini_key_status.config(
+            text="✔ Gültig" if ok else "✘ Ungültig",
+            fg=ACCENT_GREEN if ok else ACCENT_RED,
+        )
+
+    def _delete_all_data(self):
+        try:
+            import results_store
+            n = results_store.get_stats().get("total", 0)
+        except Exception:
+            n = 0
+        if not messagebox.askokcancel(
+            "Warnung",
+            f"Alle {n} Einträge unwiderruflich löschen?",
+            parent=self,
+        ):
+            return
+        try:
+            import results_store
+            deleted = results_store.delete_all_results()
+            messagebox.showinfo("Erledigt", f"{deleted} Einträge gelöscht.", parent=self)
+        except Exception as exc:
+            messagebox.showerror("Fehler", str(exc), parent=self)
 
     def _save(self):
         env_path = Path(".env")
@@ -273,6 +381,14 @@ class AdminPanel(tk.Toplevel):
         set_key(".env", "BATCH_SIZE", self.var_batch_size.get().strip())
         set_key(".env", "REQUEST_DELAY", self.var_delay.get().strip())
         set_key(".env", "MAX_RETRIES", self.var_retries.get().strip())
+
+        gemini_key = self.var_gemini_key.get().strip()
+        if gemini_key:
+            set_key(".env", "GOOGLE_API_KEY", gemini_key)
+            os.environ["GOOGLE_API_KEY"] = gemini_key
+
+        set_key(".env", "GEMINI_BATCH_MODEL", self.var_gemini_batch.get())
+        set_key(".env", "GEMINI_SINGLE_MODEL", self.var_gemini_single.get())
 
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.", parent=self)
         self.destroy()

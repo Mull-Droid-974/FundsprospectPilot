@@ -86,17 +86,68 @@ class _TrimWorker(threading.Thread):
         model: str,
         api_key: str,
         result_queue: queue.Queue,
+        provider: str = "anthropic",
     ):
         super().__init__(daemon=True)
         self._pdf_path = pdf_path
         self._prompt = prompt
         self._model = model
         self._api_key = api_key
+        self._provider = provider.lower()
         self._queue = result_queue
         self._stop_flag = False
 
     def stop(self):
         self._stop_flag = True
+
+    def _call_llm(self, text: str) -> str:
+        if self._provider == "gemini":
+            return self._call_llm_gemini(text)
+        return self._call_llm_anthropic(text)
+
+    def _call_llm_anthropic(self, text: str) -> str:
+        client = anthropic.Anthropic(api_key=self._api_key)
+        try:
+            response = client.messages.create(
+                model=self._model,
+                max_tokens=8192,
+                system=[{"type": "text", "text": self._prompt,
+                         "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": text[:80_000],
+                     "cache_control": {"type": "ephemeral"}},
+                ]}],
+            )
+        except anthropic.AuthenticationError:
+            raise RuntimeError("Ungültiger API-Key — bitte im Admin konfigurieren.")
+        except anthropic.RateLimitError:
+            raise RuntimeError("Rate Limit erreicht — bitte kurz warten und erneut starten.")
+        except anthropic.BadRequestError as exc:
+            raise RuntimeError(f"Eingabe zu lang für Modell-Kontext: {exc}")
+        except anthropic.APIStatusError as exc:
+            raise RuntimeError(f"API-Fehler {exc.status_code}: {exc.message}")
+        if response.stop_reason == "max_tokens":
+            self._queue.put(("log", "⚠ Ausgabe-Limit (max_tokens) — Text möglicherweise abgeschnitten."))
+        return "".join(b.text for b in response.content if hasattr(b, "text"))
+
+    def _call_llm_gemini(self, text: str) -> str:
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise RuntimeError("google-generativeai nicht installiert. Bitte: pip install google-generativeai")
+        genai.configure(api_key=self._api_key)
+        model = genai.GenerativeModel(self._model, system_instruction=self._prompt)
+        try:
+            response = model.generate_content(
+                text[:80_000],
+                generation_config={"max_output_tokens": 8192},
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "API_KEY_INVALID" in msg or "UNAUTHENTICATED" in msg:
+                raise RuntimeError("Ungültiger Gemini API-Key — bitte im Admin konfigurieren.")
+            raise RuntimeError(f"Gemini API-Fehler: {exc}")
+        return response.text if hasattr(response, "text") else ""
 
     def run(self):
         try:
@@ -126,37 +177,12 @@ class _TrimWorker(threading.Thread):
                 return
 
             # 3. LLM-Trim
-            client = anthropic.Anthropic(api_key=self._api_key)
             try:
-                response = client.messages.create(
-                    model=self._model,
-                    max_tokens=8192,
-                    system=[{"type": "text", "text": self._prompt,
-                             "cache_control": {"type": "ephemeral"}}],
-                    messages=[{"role": "user", "content": [
-                        {"type": "text", "text": full_text[:80_000],
-                         "cache_control": {"type": "ephemeral"}},
-                    ]}],
-                )
-            except anthropic.AuthenticationError:
-                self._queue.put(("error", "Ungültiger API-Key — bitte im Admin konfigurieren."))
+                trimmed = self._call_llm(full_text)
+            except Exception as exc:
+                self._queue.put(("error", str(exc)))
+                self._queue.put(("done", None))
                 return
-            except anthropic.RateLimitError:
-                self._queue.put(("error", "Rate Limit erreicht — bitte kurz warten und erneut starten."))
-                return
-            except anthropic.BadRequestError as exc:
-                self._queue.put(("error", f"Eingabe zu lang für Modell-Kontext — PDF kürzen: {exc}"))
-                return
-            except anthropic.APIStatusError as exc:
-                self._queue.put(("error", f"API-Fehler {exc.status_code}: {exc.message}"))
-                return
-
-            if response.stop_reason == "max_tokens":
-                self._queue.put(("log", "⚠ Ausgabe-Limit erreicht (max_tokens) — Text möglicherweise abgeschnitten."))
-
-            trimmed = "".join(
-                block.text for block in response.content if hasattr(block, "text")
-            )
             reduction = 100 - int(len(trimmed) / max(orig_len, 1) * 100)
             self._queue.put(("trimmed", trimmed))
             self._queue.put(("log",
@@ -181,17 +207,51 @@ class _BatchTrimWorker(threading.Thread):
         api_key: str,
         result_queue: queue.Queue,
         workers: int = 2,
+        provider: str = "anthropic",
     ):
         super().__init__(daemon=True)
         self._pdf_paths = pdf_paths
         self._prompt = prompt
         self._model = model
         self._api_key = api_key
+        self._provider = provider.lower()
         self._queue = result_queue
         self._stop_flag = False
         self._workers = max(1, workers)
         self._done = 0
         self._lock = threading.Lock()
+
+    def _call_llm(self, text: str) -> str:
+        if self._provider == "gemini":
+            return self._call_llm_gemini(text)
+        return self._call_llm_anthropic(text)
+
+    def _call_llm_anthropic(self, text: str) -> str:
+        client = anthropic.Anthropic(api_key=self._api_key)
+        response = client.messages.create(
+            model=self._model,
+            max_tokens=8192,
+            system=[{"type": "text", "text": self._prompt,
+                     "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": text[:80_000],
+                 "cache_control": {"type": "ephemeral"}},
+            ]}],
+        )
+        return "".join(b.text for b in response.content if hasattr(b, "text"))
+
+    def _call_llm_gemini(self, text: str) -> str:
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise RuntimeError("google-generativeai nicht installiert.")
+        genai.configure(api_key=self._api_key)
+        model = genai.GenerativeModel(self._model, system_instruction=self._prompt)
+        response = model.generate_content(
+            text[:80_000],
+            generation_config={"max_output_tokens": 8192},
+        )
+        return response.text if hasattr(response, "text") else ""
 
     def stop(self):
         self._stop_flag = True
@@ -215,47 +275,19 @@ class _BatchTrimWorker(threading.Thread):
                 self._emit("batch_progress", (done, total, pdf_path))
                 return
 
-            client = anthropic.Anthropic(api_key=self._api_key)
             try:
-                response = client.messages.create(
-                    model=self._model,
-                    max_tokens=8192,
-                    system=[{"type": "text", "text": self._prompt,
-                             "cache_control": {"type": "ephemeral"}}],
-                    messages=[{"role": "user", "content": [
-                        {"type": "text", "text": full_text[:80_000],
-                         "cache_control": {"type": "ephemeral"}},
-                    ]}],
-                )
-            except anthropic.AuthenticationError:
-                self._emit("log", f"✗ {name}: Ungültiger API-Key — Batch abgebrochen.")
-                self._stop_flag = True
-                return
-            except anthropic.RateLimitError:
-                self._emit("log", f"  ✗ {name}: Rate Limit — übersprungen.")
+                trimmed = self._call_llm(full_text)
+            except Exception as exc:
+                msg = str(exc)
+                if "API-Key" in msg or "Ungültig" in msg:
+                    self._emit("log", f"✗ {name}: {msg} — Batch abgebrochen.")
+                    self._stop_flag = True
+                    return
+                self._emit("log", f"  ✗ {name}: {msg}")
                 with self._lock:
                     done = self._done
                 self._emit("batch_progress", (done, total, pdf_path))
                 return
-            except anthropic.BadRequestError as exc:
-                self._emit("log", f"  ✗ {name}: Eingabe zu lang — {exc}")
-                with self._lock:
-                    done = self._done
-                self._emit("batch_progress", (done, total, pdf_path))
-                return
-            except anthropic.APIStatusError as exc:
-                self._emit("log", f"  ✗ {name}: API-Fehler {exc.status_code} — {exc.message}")
-                with self._lock:
-                    done = self._done
-                self._emit("batch_progress", (done, total, pdf_path))
-                return
-
-            if response.stop_reason == "max_tokens":
-                self._emit("log", f"  ⚠ {name}: Ausgabe-Limit (max_tokens) — möglicherweise abgeschnitten.")
-
-            trimmed = "".join(
-                block.text for block in response.content if hasattr(block, "text")
-            )
             out = Path(pdf_path).with_suffix(".trimmed.txt")
             out.write_text(trimmed, encoding="utf-8")
 
@@ -360,11 +392,23 @@ class PdfTrimWindow(tk.Toplevel):
         ).pack(side="right", padx=(12, 4))
 
         self._model_var = tk.StringVar(value=_MODELS[0])
-        ttk.Combobox(
+        self._model_combo = ttk.Combobox(
             inner, textvariable=self._model_var, values=_MODELS,
             state="readonly", width=28, font=("Segoe UI", 9),
-        ).pack(side="right", padx=(2, 0))
+        )
+        self._model_combo.pack(side="right", padx=(2, 0))
         tk.Label(inner, text="Modell:", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 9)).pack(side="right", padx=(8, 2))
+
+        self._provider_var = tk.StringVar(value="anthropic")
+        provider_combo = ttk.Combobox(
+            inner, textvariable=self._provider_var,
+            values=["anthropic", "gemini"], state="readonly", width=10,
+            font=("Segoe UI", 9),
+        )
+        provider_combo.pack(side="right", padx=(2, 0))
+        provider_combo.bind("<<ComboboxSelected>>", self._on_provider_changed)
+        tk.Label(inner, text="Anbieter:", bg=BG_PANEL, fg=FG_MUTED,
                  font=("Segoe UI", 9)).pack(side="right", padx=(8, 2))
 
         self._workers_var = tk.IntVar(value=2)
@@ -503,6 +547,13 @@ class PdfTrimWindow(tk.Toplevel):
         except Exception:
             pass
 
+    def _on_provider_changed(self, _event=None):
+        from llm_provider import get_models, get_default_batch_model
+        provider = self._provider_var.get()
+        models = get_models(provider)
+        self._model_combo.config(values=models)
+        self._model_var.set(get_default_batch_model(provider) if models else "")
+
     def _refresh_list(self):
         self._load_isin_map()
         self._tree.delete(*self._tree.get_children())
@@ -624,10 +675,12 @@ class PdfTrimWindow(tk.Toplevel):
         if self._worker and self._worker.is_alive():
             return
 
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        provider = self._provider_var.get()
+        api_key = os.getenv("GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY", "")
+        key_label = "GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
         if not api_key:
             messagebox.showerror("API-Key fehlt",
-                                 "Kein ANTHROPIC_API_KEY in .env gefunden.",
+                                 f"Kein {key_label} in .env gefunden.",
                                  parent=self)
             return
 
@@ -643,6 +696,7 @@ class PdfTrimWindow(tk.Toplevel):
             model=self._model_var.get(),
             api_key=api_key,
             result_queue=self._event_queue,
+            provider=provider,
         )
         self._worker.start()
         self._set_running(True)
@@ -657,10 +711,12 @@ class PdfTrimWindow(tk.Toplevel):
                                    parent=self)
             return
 
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        provider = self._provider_var.get()
+        api_key = os.getenv("GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY", "")
+        key_label = "GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
         if not api_key:
             messagebox.showerror("API-Key fehlt",
-                                 "Kein ANTHROPIC_API_KEY in .env gefunden.",
+                                 f"Kein {key_label} in .env gefunden.",
                                  parent=self)
             return
 
@@ -691,6 +747,7 @@ class PdfTrimWindow(tk.Toplevel):
             api_key=api_key,
             result_queue=self._event_queue,
             workers=self._workers_var.get(),
+            provider=provider,
         )
         self._worker.start()
         self._set_running(True)

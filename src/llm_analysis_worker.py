@@ -94,12 +94,14 @@ class LLMAnalysisWorker(threading.Thread):
         event_queue: queue.Queue,
         delay: float = 0.5,
         workers: int = 2,
+        provider: str = "anthropic",
     ):
         super().__init__(daemon=True)
         self._groups = groups
         self._prompt_template = prompt_template
         self._model = model
         self._api_key = api_key
+        self._provider = provider.lower()
         self._queue = event_queue
         self._delay = delay
         self._workers = max(1, workers)
@@ -137,7 +139,11 @@ class LLMAnalysisWorker(threading.Thread):
     def _call_llm(self, pdf_text: str, group_rows: list[dict]) -> dict | None:
         isin_list = self._build_isin_list(group_rows)
         prompt = self._prompt_template.replace("{isin_list}", isin_list)
+        if self._provider == "gemini":
+            return self._call_llm_gemini(pdf_text, prompt)
+        return self._call_llm_anthropic(pdf_text, prompt)
 
+    def _call_llm_anthropic(self, pdf_text: str, prompt: str) -> dict | None:
         client = anthropic.Anthropic(api_key=self._api_key)
         try:
             response = client.messages.create(
@@ -168,6 +174,33 @@ class LLMAnalysisWorker(threading.Thread):
             if hasattr(block, "text"):
                 raw += block.text
 
+        return self._parse_response(raw)
+
+    def _call_llm_gemini(self, pdf_text: str, prompt: str) -> dict | None:
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise RuntimeError("google-generativeai nicht installiert. Bitte: pip install google-generativeai")
+
+        genai.configure(api_key=self._api_key)
+        model = genai.GenerativeModel(
+            self._model,
+            system_instruction=prompt,
+        )
+        try:
+            response = model.generate_content(
+                f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
+                generation_config={"max_output_tokens": 2048},
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "API_KEY_INVALID" in msg or "UNAUTHENTICATED" in msg:
+                raise RuntimeError("Ungültiger Gemini API-Key — bitte im Admin konfigurieren.")
+            if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+                raise _RateLimitRetry()
+            raise RuntimeError(f"Gemini API-Fehler: {exc}")
+
+        raw = response.text if hasattr(response, "text") else ""
         return self._parse_response(raw)
 
     def _parse_response(self, text: str) -> dict | None:
