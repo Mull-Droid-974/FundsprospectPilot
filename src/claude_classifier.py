@@ -158,15 +158,10 @@ def _parse_result(text: str, isin: str = "") -> dict:
     if start >= 0 and end > start:
         text = text[start:end]
 
-    try:
-        result = json.loads(text)
-
-        # Fehlende Felder mit Defaults füllen
+    def _normalize(result: dict) -> dict:
         for key, default in EMPTY_RESULT.items():
             if key not in result:
                 result[key] = default
-
-        # Segmentierung normalisieren
         seg = result.get("segmentierung", "").lower().strip()
         if "institut" in seg:
             result["segmentierung"] = "institutional"
@@ -174,14 +169,26 @@ def _parse_result(text: str, isin: str = "") -> dict:
             result["segmentierung"] = "retail"
         else:
             result["segmentierung"] = seg or "unklar"
-
         return result
 
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON-Parsing fehlgeschlagen für ISIN {isin}: {e}\nAntwort: {text[:500]}")
-        result = EMPTY_RESULT.copy()
-        result["begruendung"] = f"JSON-Parsing fehlgeschlagen: {str(e)[:100]}"
-        return result
+    try:
+        return _normalize(json.loads(text))
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, dict):
+            logger.warning(f"JSON-Antwort für ISIN {isin} automatisch repariert.")
+            return _normalize(repaired)
+    except Exception:
+        pass
+
+    logger.error(f"JSON-Parsing fehlgeschlagen für ISIN {isin}\nAntwort: {text[:500]}")
+    result = EMPTY_RESULT.copy()
+    result["begruendung"] = "JSON-Parsing fehlgeschlagen"
+    return result
 
 
 from utils import validate_api_key  # noqa: F401 — Re-Export für Rückwärtskompatibilität

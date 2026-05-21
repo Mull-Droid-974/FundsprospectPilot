@@ -56,9 +56,24 @@ EMPTY_RESULT = {
 
 # Kosten-Heuristik (USD pro 1M Tokens, Input)
 COST_PER_MTOK: dict[str, float] = {
-    "gemini-2.5-flash-preview-05-20": 0.15,
-    "gemini-2.5-pro-preview-05-06":   1.25,
+    "gemini-2.5-flash":      0.15,
+    "gemini-2.5-flash-lite": 0.10,
+    "gemini-2.5-pro":        1.25,
+    "gemini-2.0-flash":      0.10,
+    "gemini-3-flash-preview": 0.15,
+    "gemini-3-pro-preview":  1.25,
 }
+
+
+def _gemini_client(api_key: str):
+    try:
+        from google import genai
+    except ImportError:
+        raise ImportError(
+            "google-genai ist nicht installiert. "
+            "Bitte 'pip install google-genai' ausführen."
+        )
+    return genai.Client(api_key=api_key)
 
 
 def classify_with_gemini(
@@ -67,28 +82,18 @@ def classify_with_gemini(
     fund_name: str = "",
     additional_context: str = "",
     api_key: str = "",
-    model: str = "gemini-2.5-flash-preview-05-20",
+    model: str = "gemini-2.5-flash",
 ) -> dict:
     """
-    Klassifiziert einen Fondsprospekt-Text via Google Gemini API.
-
-    Returns:
-        Dict mit segmentierung, fondstyp, anlegertyp, kundentyp, begruendung, konfidenz
+    Klassifiziert einen Fondsprospekt-Text via Google Gemini API (google-genai SDK).
     """
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        raise ImportError(
-            "google-generativeai ist nicht installiert. "
-            "Bitte 'pip install google-generativeai' ausführen."
-        )
-
     if not api_key:
         raise ValueError("Kein GOOGLE_API_KEY vorhanden. Bitte im Admin-Bereich eintragen.")
 
-    genai.configure(api_key=api_key)
+    from google.genai import types
 
-    # Prompt aufbauen
+    client = _gemini_client(api_key)
+
     parts = []
     if isin or fund_name:
         parts.append(f"**ISIN:** {isin}\n**Fonds:** {fund_name}\n\n")
@@ -101,20 +106,23 @@ def classify_with_gemini(
     logger.info(f"Sende {len(user_message):,} Zeichen an Gemini API (ISIN: {isin}, Modell: {model})")
 
     try:
-        client = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=SYSTEM_PROMPT,
+        response = client.models.generate_content(
+            model=model,
+            contents=user_message,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                max_output_tokens=8192,
+            ),
         )
-        response = client.generate_content(user_message)
         result_text = response.text or ""
         logger.info(f"Gemini Antwort erhalten ({len(result_text)} Zeichen)")
         return _parse_result(result_text, isin)
 
     except Exception as e:
         err = str(e)
-        if "API_KEY_INVALID" in err or "INVALID_ARGUMENT" in err:
+        if "UNAUTHENTICATED" in err or "API_KEY_INVALID" in err or "401" in err:
             raise ValueError("Ungültiger Google API-Key.")
-        if "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+        if "RESOURCE_EXHAUSTED" in err or "quota" in err.lower() or "429" in err:
             raise RuntimeError("Gemini API Rate Limit / Quota erreicht.")
         logger.error(f"Gemini API Fehler für ISIN {isin}: {e}")
         raise
@@ -122,32 +130,35 @@ def classify_with_gemini(
 
 def validate_gemini_key(api_key: str) -> tuple[bool, str]:
     """
-    Testet den Google API-Key mit einem minimalen Aufruf.
-
-    Returns:
-        (True, "gemini-2.5-flash-preview-05-20") bei Erfolg
-        (False, "Fehlermeldung")                 bei Fehler
+    Testet den Google API-Key mit einem minimalen Aufruf (google-genai SDK).
     """
     try:
-        import google.generativeai as genai
+        from google.genai import types
     except ImportError:
-        return False, "google-generativeai nicht installiert (pip install google-generativeai)"
+        return False, "google-genai nicht installiert (pip install google-genai)"
 
-    test_model = "gemini-2.5-flash-preview-05-20"
+    test_model = "gemini-2.5-flash"
     try:
-        genai.configure(api_key=api_key)
-        client = genai.GenerativeModel(model_name=test_model)
-        response = client.generate_content("Antworte nur mit: ok")
+        client = _gemini_client(api_key)
+        response = client.models.generate_content(
+            model=test_model,
+            contents="Antworte nur mit: ok",
+            config=types.GenerateContentConfig(max_output_tokens=10),
+        )
         if response.text:
             return True, test_model
         return False, "Leere Antwort vom Modell"
     except Exception as e:
         err = str(e)
-        if "API_KEY_INVALID" in err or "INVALID_ARGUMENT" in err:
+        if "UNAUTHENTICATED" in err or "API_KEY_INVALID" in err or "401" in err:
             return False, "Ungültiger API-Key"
-        if "PERMISSION_DENIED" in err:
+        if "PERMISSION_DENIED" in err or "403" in err:
             return False, "Zugriff verweigert (API nicht aktiviert?)"
-        return False, f"Fehler: {err[:120]}"
+        if "RESOURCE_EXHAUSTED" in err or "429" in err:
+            return True, f"{test_model} (Key gültig, Quota erreicht)"
+        if "UNAVAILABLE" in err or "503" in err:
+            return True, f"{test_model} (Key gültig, Modell kurz überlastet)"
+        return False, f"Fehler: {err[:150]}"
 
 
 def _parse_result(text: str, isin: str = "") -> dict:
@@ -164,12 +175,10 @@ def _parse_result(text: str, isin: str = "") -> dict:
     if start >= 0 and end > start:
         text = text[start:end]
 
-    try:
-        result = json.loads(text)
+    def _normalize(result: dict) -> dict:
         for key, default in EMPTY_RESULT.items():
             if key not in result:
                 result[key] = default
-
         seg = result.get("segmentierung", "unklar").lower().strip()
         if "institut" in seg:
             result["segmentierung"] = "institutional"
@@ -177,11 +186,23 @@ def _parse_result(text: str, isin: str = "") -> dict:
             result["segmentierung"] = "retail"
         else:
             result["segmentierung"] = "unklar"
-
         return result
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Gemini JSON-Parsing fehlgeschlagen für ISIN {isin}: {e}\nAntwort: {text[:500]}")
-        result = EMPTY_RESULT.copy()
-        result["begruendung"] = f"JSON-Parsing fehlgeschlagen: {str(e)[:100]}"
-        return result
+    try:
+        return _normalize(json.loads(text))
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        from json_repair import repair_json
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, dict):
+            logger.warning(f"Gemini JSON-Antwort für ISIN {isin} automatisch repariert.")
+            return _normalize(repaired)
+    except Exception:
+        pass
+
+    logger.error(f"Gemini JSON-Parsing fehlgeschlagen für ISIN {isin}\nAntwort: {text[:500]}")
+    result = EMPTY_RESULT.copy()
+    result["begruendung"] = "JSON-Parsing fehlgeschlagen"
+    return result

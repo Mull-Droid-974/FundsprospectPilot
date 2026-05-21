@@ -339,6 +339,8 @@ class PdfTrimWindow(tk.Toplevel):
         self._pdf_folder = _PDF_FOLDER
         self._worker: _TrimWorker | _BatchTrimWorker | None = None
         self._event_queue: queue.Queue = queue.Queue()
+        self._pdf_list_data: list[dict] = []
+        self._search_var = tk.StringVar()
         self._pending_trimmed: str = ""
         self._selected_pdf: str = ""
         self._isin_map: dict[str, list[str]] = {}
@@ -433,6 +435,21 @@ class PdfTrimWindow(tk.Toplevel):
                  bg=BG_MAIN, fg=FG_MUTED,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 2))
 
+        # Suchfeld
+        search_row = tk.Frame(left, bg=BG_MAIN)
+        search_row.pack(fill="x", pady=(0, 4))
+        tk.Label(search_row, text="🔍", bg=BG_MAIN, fg=FG_MUTED,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(0, 2))
+        self._search_var.trace_add("write", lambda *_: self._fill_list())
+        tk.Entry(search_row, textvariable=self._search_var,
+                 bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT,
+                 relief="flat", font=("Segoe UI", 9)).pack(side="left", fill="x", expand=True)
+        tk.Button(search_row, text="✕",
+                  command=lambda: self._search_var.set(""),
+                  bg=BG_MAIN, fg=FG_MUTED, relief="flat",
+                  font=("Segoe UI", 8), padx=2, pady=0,
+                  cursor="hand2", activebackground=BG_MAIN).pack(side="left", padx=(2, 0))
+
         list_frame = tk.Frame(left, bg=BG_MAIN)
         list_frame.pack(fill="both", expand=True)
 
@@ -469,6 +486,7 @@ class PdfTrimWindow(tk.Toplevel):
 
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
         self._tree.bind("<Button-3>", self._on_right_click)
+        self._tree.bind("<Double-1>", self._on_double_click)
 
         tk.Button(
             left, text="↺  Aktualisieren", command=self._refresh_list,
@@ -556,27 +574,38 @@ class PdfTrimWindow(tk.Toplevel):
 
     def _refresh_list(self):
         self._load_isin_map()
+        self._pdf_list_data = []
+        if self._pdf_folder.exists():
+            for pdf in sorted(self._pdf_folder.glob("*.pdf")):
+                has_trim = pdf.with_suffix(".trimmed.txt").exists()
+                tables_file = pdf.with_suffix(".tables.json")
+                tab_count = "—"
+                if tables_file.exists():
+                    try:
+                        tab_count = str(len(json.loads(
+                            tables_file.read_text(encoding="utf-8"))))
+                    except Exception:
+                        pass
+                isins = self._isin_map.get(pdf.name, [])
+                self._pdf_list_data.append({
+                    "path": str(pdf),
+                    "name": pdf.name,
+                    "trim": "✓" if has_trim else "—",
+                    "tab":  tab_count,
+                    "isins": str(len(isins)) if isins else "—",
+                    "tag":  "trimmed" if has_trim else "plain",
+                })
+        self._fill_list()
+
+    def _fill_list(self):
+        search = self._search_var.get().strip().lower()
         self._tree.delete(*self._tree.get_children())
-        if not self._pdf_folder.exists():
-            return
-        for pdf in sorted(self._pdf_folder.glob("*.pdf")):
-            has_trim = pdf.with_suffix(".trimmed.txt").exists()
-            tables_file = pdf.with_suffix(".tables.json")
-            tab_count = "—"
-            if tables_file.exists():
-                try:
-                    tab_count = str(len(json.loads(
-                        tables_file.read_text(encoding="utf-8"))))
-                except Exception:
-                    pass
-            isins = self._isin_map.get(pdf.name, [])
-            tag = "trimmed" if has_trim else "plain"
-            self._tree.insert("", "end", iid=str(pdf), values=(
-                pdf.name,
-                "✓" if has_trim else "—",
-                tab_count,
-                str(len(isins)) if isins else "—",
-            ), tags=(tag,))
+        for item in self._pdf_list_data:
+            if search and search not in item["name"].lower():
+                continue
+            self._tree.insert("", "end", iid=item["path"], values=(
+                item["name"], item["trim"], item["tab"], item["isins"],
+            ), tags=(item["tag"],))
 
     # ─── Auswahl ─────────────────────────────────────────────────────────────
 
@@ -664,6 +693,14 @@ class PdfTrimWindow(tk.Toplevel):
         menu.add_command(label="Tabellen löschen (.tables.json)",
                          command=lambda: _del(".tables.json"))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_double_click(self, event):
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        self._tree.selection_set(iid)
+        self._on_select()
+        self._start_worker()
 
     # ─── Worker ──────────────────────────────────────────────────────────────
 

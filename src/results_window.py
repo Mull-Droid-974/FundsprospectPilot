@@ -348,11 +348,11 @@ class ResultsWindow(tk.Toplevel):
                                 "ausschuettungsart", "fondswaehrung"]),
             ("Analyse", ["segmentierung", "fondstyp", "anlegertyp", "kundentyp",
                          "konfidenz", "analysiert_am"]),
-            ("Begründung", ["llm_segmentierung_begruendung"]),
+            ("LLM-Segmentierung", ["llm_segmentierung", "llm_segmentierung_begruendung"]),
             ("Fundinfo API", ["fundinfo_ter", "fundinfo_investor_type", "umbrella_id",
                               "ongoing_charges_datum", "qualif_anleger_ch", "institutional_ch"]),
             ("Prospekt", ["prospekt_url", "prospekt_pfad"]),
-            ("Rohdaten LLM", ["llm_segmentierung", "fondstyp_roh", "anlegertyp_roh", "kundentyp_roh"]),
+            ("Rohdaten LLM", ["fondstyp_roh", "anlegertyp_roh", "kundentyp_roh"]),
         ]
 
         _LABELS = {k: h for k, h, _ in _COLS}

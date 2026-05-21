@@ -70,7 +70,7 @@ class App(tk.Tk):
         self._build_statusbar()
 
     def _build_sidebar(self):
-        sb = tk.Frame(self, bg=BG_PANEL, width=145)
+        sb = tk.Frame(self, bg=BG_PANEL, width=160)
         sb.pack(side="left", fill="y")
         sb.pack_propagate(False)
 
@@ -82,20 +82,30 @@ class App(tk.Tk):
         tk.Label(logo, text="FundsPilot", bg=BG_PANEL, fg=ACCENT_LAVENDER,
                  font=("Segoe UI", 8, "bold")).pack()
 
-        ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(4, 10))
+        ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(4, 6))
 
-        items = [
-            ("📊", "Ergebnisse",  self._open_results,          ACCENT_GREEN),
-            ("🗃",  "Daten",       self._open_data_management,  ACCENT_BLUE),
-            ("📄", "Prospekte",   self._open_download_window,   ACCENT_YELLOW),
-            ("🔬", "Analyse",     self._open_analysis_window,   ACCENT_LAVENDER),
-            ("✂",  "PDF-Kürzer", self._open_pdf_trim_window,   ACCENT_BLUE),
-            ("⚖",  "Vergleich",  self._open_comparison_window, ACCENT_YELLOW),
-        ]
-        for icon, label, cmd, color in items:
-            self._nav_btn(sb, icon, label, cmd, color)
+        # ── Vorbereitung ─────────────────────────────────────────────
+        self._section_label(sb, "VORBEREITUNG")
+        self._nav_btn(sb, "🗃",  "1. Daten",      self._open_data_management,  ACCENT_BLUE)
+        self._nav_btn(sb, "📄", "2. Prospekte",  self._open_download_window,   ACCENT_YELLOW)
 
-        # Push Admin to bottom
+        ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(8, 6))
+
+        # ── Verarbeitung ─────────────────────────────────────────────
+        self._section_label(sb, "VERARBEITUNG")
+        self._nav_btn(sb, "✂",  "3. PDF-Kürzen", self._open_pdf_trim_window,  ACCENT_BLUE)
+        tk.Label(sb, text="   (optional)", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 7, "italic"), anchor="w").pack(fill="x", padx=16)
+        self._nav_btn(sb, "🔬", "4. Analyse",    self._open_analysis_window,   ACCENT_LAVENDER)
+
+        ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(8, 6))
+
+        # ── Auswertung ───────────────────────────────────────────────
+        self._section_label(sb, "AUSWERTUNG")
+        self._nav_btn(sb, "📊", "5. Ergebnisse", self._open_results,           ACCENT_GREEN)
+        self._nav_btn(sb, "⚖",  "6. Vergleich", self._open_comparison_window,  ACCENT_YELLOW)
+
+        # Admin (unten)
         tk.Frame(sb, bg=BG_PANEL).pack(fill="both", expand=True)
         ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=4)
         self._nav_btn(sb, "⚙", "Admin", self._open_admin, FG_MUTED)
@@ -134,6 +144,14 @@ class App(tk.Tk):
             w.bind("<Enter>", on_enter)
             w.bind("<Leave>", on_leave)
             w.bind("<Button-1>", on_click)
+
+    def _section_label(self, parent, text: str):
+        tk.Label(
+            parent, text=text,
+            bg=BG_PANEL, fg=FG_MUTED,
+            font=("Segoe UI", 7, "bold"),
+            anchor="w", padx=16,
+        ).pack(fill="x", pady=(4, 2))
 
     def _build_dashboard(self, parent):
         dash = tk.Frame(parent, bg=BG_MAIN)

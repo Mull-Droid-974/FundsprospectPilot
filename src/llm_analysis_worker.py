@@ -178,25 +178,26 @@ class LLMAnalysisWorker(threading.Thread):
 
     def _call_llm_gemini(self, pdf_text: str, prompt: str) -> dict | None:
         try:
-            import google.generativeai as genai
+            from google import genai
+            from google.genai import types
         except ImportError:
-            raise RuntimeError("google-generativeai nicht installiert. Bitte: pip install google-generativeai")
+            raise RuntimeError("google-genai nicht installiert. Bitte: pip install google-genai")
 
-        genai.configure(api_key=self._api_key)
-        model = genai.GenerativeModel(
-            self._model,
-            system_instruction=prompt,
-        )
+        client = genai.Client(api_key=self._api_key)
         try:
-            response = model.generate_content(
-                f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
-                generation_config={"max_output_tokens": 2048},
+            response = client.models.generate_content(
+                model=self._model,
+                contents=f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
+                config=types.GenerateContentConfig(
+                    system_instruction=prompt,
+                    max_output_tokens=8192,
+                ),
             )
         except Exception as exc:
             msg = str(exc)
-            if "API_KEY_INVALID" in msg or "UNAUTHENTICATED" in msg:
+            if "UNAUTHENTICATED" in msg or "API_KEY_INVALID" in msg or "401" in msg:
                 raise RuntimeError("Ungültiger Gemini API-Key — bitte im Admin konfigurieren.")
-            if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+            if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower() or "429" in msg:
                 raise _RateLimitRetry()
             raise RuntimeError(f"Gemini API-Fehler: {exc}")
 
@@ -215,21 +216,36 @@ class LLMAnalysisWorker(threading.Thread):
         if start < 0 or end <= start:
             return None
 
+        json_str = text[start:end]
         try:
-            return json.loads(text[start:end])
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON-Parsing fehlgeschlagen: {e}\nAntwort: {text[:300]}")
-            return None
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(json_str, return_objects=True)
+            if isinstance(repaired, dict):
+                logger.warning("JSON-Antwort wurde automatisch repariert (unescapte Anführungszeichen o.ä.).")
+                return repaired
+        except Exception:
+            pass
+
+        logger.error(f"JSON-Parsing fehlgeschlagen (auch nach Reparatur)\nAntwort: {text[:300]}")
+        return None
 
     def _match_and_save(self, parsed: dict, group_rows: list[dict], model: str):
         """Matched LLM-Antwort auf ISINs und speichert Ergebnisse in DB."""
-        fondstyp      = parsed.get("fondstyp",      "") or ""
-        anleger       = parsed.get("anlegertyp",    "") or ""
-        kunden        = parsed.get("kundentyp",     "") or ""
-        fondstyp_roh  = parsed.get("fondstyp_roh",  "") or ""
-        anleger_roh   = parsed.get("anlegertyp_roh","") or ""
-        kunden_roh    = parsed.get("kundentyp_roh", "") or ""
-        klassen       = parsed.get("anteilsklassen", []) or []
+        fondstyp     = parsed.get("fondstyp",     "") or ""
+        fondstyp_roh = parsed.get("fondstyp_roh", "") or ""
+        klassen      = parsed.get("anteilsklassen", []) or []
+
+        # Subfonds-Level Fallbacks für Anleger-/Kundentyp (Rückwärtskompatibilität
+        # mit älteren Prompt-Versionen die noch Top-Level-Felder liefern)
+        anleger_fallback     = parsed.get("anlegertyp",     "") or ""
+        kunden_fallback      = parsed.get("kundentyp",      "") or ""
+        anleger_roh_fallback = parsed.get("anlegertyp_roh", "") or ""
+        kunden_roh_fallback  = parsed.get("kundentyp_roh",  "") or ""
 
         # Index: isin → klassen-entry, anteilsklasse_name → klassen-entry
         by_isin: dict[str, dict] = {}
@@ -241,6 +257,8 @@ class LLMAnalysisWorker(threading.Thread):
                 by_isin[ki] = k
             if kn:
                 by_name[kn] = k
+
+        fondstyp_quelle = parsed.get("fondstyp_quelle", "") or ""
 
         for row in group_rows:
             isin = row["isin"]
@@ -255,15 +273,40 @@ class LLMAnalysisWorker(threading.Thread):
             seg = _normalize_seg(
                 klassen_entry.get("segmentierung", "") if klassen_entry else ""
             )
-            begruendung = (
-                (klassen_entry.get("begruendung") or "") if klassen_entry else ""
-            )
-            mindestanlage = (
-                (klassen_entry.get("mindestanlage") or "") if klassen_entry else ""
-            )
-            mindestanlage_roh = (
-                (klassen_entry.get("mindestanlage_roh") or "") if klassen_entry else ""
-            )
+            begruendung       = (klassen_entry.get("begruendung")          or "") if klassen_entry else ""
+            mindestanlage     = (klassen_entry.get("mindestanlage")        or "") if klassen_entry else ""
+            mindestanlage_roh = (klassen_entry.get("mindestanlage_roh")    or "") if klassen_entry else ""
+            info_quelle       = (klassen_entry.get("info_quelle")          or "") if klassen_entry else ""
+            mindestanlage_q   = (klassen_entry.get("mindestanlage_quelle") or "") if klassen_entry else ""
+
+            # Anleger-/Kundentyp: klassenspezifisch bevorzugen, Fallback auf Subfonds-Level
+            anleger     = (klassen_entry.get("anlegertyp")     or "") if klassen_entry else ""
+            anleger_roh = (klassen_entry.get("anlegertyp_roh") or "") if klassen_entry else ""
+            kunden      = (klassen_entry.get("kundentyp")      or "") if klassen_entry else ""
+            kunden_roh  = (klassen_entry.get("kundentyp_roh")  or "") if klassen_entry else ""
+            if not anleger:
+                anleger     = anleger_fallback
+                anleger_roh = f"[Quelle: Subfonds] {anleger_roh_fallback}" if anleger_roh_fallback else ""
+            if not kunden:
+                kunden     = kunden_fallback
+                kunden_roh = f"[Quelle: Subfonds] {kunden_roh_fallback}" if kunden_roh_fallback else ""
+
+            # Mindestanlage leeren wenn Quelle übergeordnet
+            if mindestanlage_q in ("Subfonds", "Umbrella", "nicht gefunden"):
+                mindestanlage = ""
+
+            # Quell-Präfix in _roh-Felder einbauen für Nachvollziehbarkeit
+            if mindestanlage_q:
+                mindestanlage_roh = (
+                    f"[Quelle: {mindestanlage_q}] {mindestanlage_roh}"
+                    if mindestanlage_roh else f"[Quelle: {mindestanlage_q}]"
+                )
+            if info_quelle and info_quelle != "ISIN-spezifisch":
+                begruendung = f"[Quelle: {info_quelle}] {begruendung}"
+            if fondstyp_quelle:
+                ft_roh = f"[Quelle: {fondstyp_quelle}] {fondstyp_roh}" if fondstyp_roh else f"[Quelle: {fondstyp_quelle}]"
+            else:
+                ft_roh = fondstyp_roh
 
             results_store.update_llm_analysis(
                 isin=isin,
@@ -272,7 +315,7 @@ class LLMAnalysisWorker(threading.Thread):
                 kundentyp=kunden,
                 llm_segmentierung=seg,
                 llm_segmentierung_begruendung=begruendung[:400],
-                fondstyp_roh=fondstyp_roh[:200],
+                fondstyp_roh=ft_roh[:200],
                 anlegertyp_roh=anleger_roh[:200],
                 kundentyp_roh=kunden_roh[:200],
                 mindestanlage=mindestanlage[:100],

@@ -19,22 +19,26 @@ MODELS: dict[str, list[str]] = {
     "anthropic": [
         "claude-haiku-4-5-20251001",
         "claude-sonnet-4-6",
-        "claude-opus-4-6",
+        "claude-opus-4-7",
     ],
     "gemini": [
-        "gemini-2.5-flash-preview-05-20",
-        "gemini-2.5-pro-preview-05-06",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
     ],
 }
 
 # Standard-Modelle (Batch / Einzel-PDF)
 DEFAULT_BATCH_MODELS = {
     "anthropic": os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001"),
-    "gemini":    os.getenv("GEMINI_BATCH_MODEL", "gemini-2.5-flash-preview-05-20"),
+    "gemini":    os.getenv("GEMINI_BATCH_MODEL", "gemini-2.5-flash"),
 }
 DEFAULT_SINGLE_MODELS = {
     "anthropic": os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6"),
-    "gemini":    os.getenv("GEMINI_SINGLE_MODEL", "gemini-2.5-pro-preview-05-06"),
+    "gemini":    os.getenv("GEMINI_SINGLE_MODEL", "gemini-2.5-pro"),
 }
 
 # Aktiver Anbieter

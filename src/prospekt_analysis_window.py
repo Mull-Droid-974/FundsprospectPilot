@@ -45,7 +45,8 @@ sowie MiFID II Anlegerklassifizierung.
 
 Analysiere den nachfolgenden Verkaufsprospekt-Auszug und bestimme die nachfolgenden \
 Felder. Wichtig: Verwende für FONDSTYP, ANLEGERTYP und KUNDENTYP AUSSCHLIESSLICH \
-die erlaubten Werte aus den Listen — wähle den semantisch nächstliegenden Wert.
+die erlaubten Werte aus den Listen — wähle den semantisch nächstliegenden Wert. \
+ANLEGERTYP und KUNDENTYP werden pro Anteilsklasse bestimmt (nicht pro Subfonds).
 
 === ERLAUBTE WERTE (zwingend auf diese mappen) ===
 
@@ -58,22 +59,39 @@ ANLEGERTYP:
 KUNDENTYP (primärer, wichtigster Kundentyp der Anteilsklasse):
 {kundentyp_liste}
 
-=== AUFGABE 1 — Fondseigenschaften (Subfonds-Ebene) ===
+=== INFORMATIONSHIERARCHIE IM PROSPEKT ===
+
+Fondsprospekte sind hierarchisch aufgebaut:
+1. UMBRELLA-EBENE: Allgemeine Dachfonds-Informationen (Verwaltungsgesellschaft, Rechtsform, ...)
+2. SUBFONDS-EBENE: Anlageziel, Benchmark, Risikoklasse — gilt für alle Anteilsklassen
+3. ANTEILSKLASSEN-EBENE: Klassenspezifische Details (Mindestanlage, TER, Vertriebsbeschränkungen)
+
+NICHT verwenden als anteilsklassen-spezifische Information:
+- Allgemeine Abschnitte "Anteilsklassenkonzept" oder "Share Class Framework" \
+(beschreiben mögliche Merkmale, keine konkreten Klassen-Parameter)
+- Umbrella-weite Aussagen über Mindestzeiträume oder Mindestgrössen
+- Formulierungen wie "der Fonds kann Klassen für..." oder "es sind Klassen möglich..."
+
+=== AUFGABE 1 — Fondstyp (Subfonds-Ebene) ===
 
 Bestimme für den gesamten Subfonds:
 - FONDSTYP: exakt ein Wert aus obiger Liste
-- ANLEGERTYP: exakt ein Wert aus obiger Liste (primäre Zielgruppe)
-- KUNDENTYP: exakt ein Wert aus obiger Liste (primärer Kundentyp)
+- fondstyp_roh: exakte Formulierung aus dem Prospekt mit Seitenangabe "S.<Nr>: <Text>"
+- fondstyp_quelle: von welcher Hierarchie-Ebene die Information stammt
 
-Für jeden dieser drei Werte: gib zusätzlich den ROH-Wert an — d.h. die exakte \
-Formulierung wie sie im Prospekt steht, bevor du sie auf die kanonische Liste gemappt hast. \
-Füge am Anfang des Roh-Werts die PDF-Seitenzahl ein, auf der du die Information gefunden hast, \
-im Format "S.<Nr>: <Text>" (z.B. "S.14: Exchange Traded Fund, passiv verwaltet").
+Suche primär auf SUBFONDS-Ebene (nicht Umbrella-Ebene).
 
 === AUFGABE 2 — Segmentierung pro Anteilsklasse ===
 
 Für jede der nachfolgend aufgeführten ISINs/Anteilsklassen bestimme unabhängig \
 die Investoren-Segmentierung.
+
+SUCHSTRATEGIE (pro ISIN):
+1. Suche den ISIN-Code wörtlich im Prospekttext (z.B. "CH0365696704")
+2. Falls kein Treffer: Suche den Anteilsklassennamen (z.B. "Klasse I", "Class A") \
+   in Tabellen oder Übersichten mit Mindestanlagebeträgen
+3. Wenn weder ISIN noch Klassenname präzise gefunden: \
+   setze info_quelle="nicht gefunden" und mindestanlage leer
 
 SEGMENTIERUNGS-KATEGORIEN:
 - retail: Privatanleger, öffentlicher Vertrieb, Minimum < 100'000 CHF/EUR
@@ -88,30 +106,46 @@ KLASSIFIZIERUNGS-HINWEISE:
 - Klassen-Suffix A/B/R/D/C → meist retail
 - Prüfe explizit: Mindestzeichnung, "reserved for", "restricted to", TER-Höhe
 - CH-ISINs oft KAG Art.10 qualifiziert; LU/IE-ISINs oft UCITS retail
+- Anlegertyp-Beschränkungen auf ANTEILSKLASSEN-Ebene haben Vorrang vor SUBFONDS-Ebene
+- Klassenname mit "I"/"Inst" ist ein Hinweis, kein Beweis — prüfe ob explizite Beschränkung vorhanden
+
+ANLEGERTYP & KUNDENTYP (pro Anteilsklasse):
+- Suche die ISIN oder den Klassennamen in einem Abschnitt, der beschreibt für welche
+  Anleger diese spezifische Klasse bestimmt ist — NICHT einen allgemeinen Paragraphen
+  der alle Klassen des Subfonds aufzählt.
+- ANLEGERTYP: exakt ein Wert aus der ANLEGERTYP-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
+- ANLEGERTYP_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
+- KUNDENTYP: exakt ein Wert aus der KUNDENTYP-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
+- KUNDENTYP_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
 
 MINDESTANLAGE (pro Anteilsklasse):
-- MINDESTANLAGE: Mindestzeichnungsbetrag exakt wie im Prospekt (Betrag + Währung, z.B. "10.000 CHF"). Nur für diese Anteilsklasse.
+- MINDESTANLAGE: Mindestzeichnungsbetrag exakt wie im Prospekt (Betrag + Währung, z.B. "10.000 CHF"). \
+  Nur für diese Anteilsklasse — leer lassen wenn keine klassenspezifische Angabe gefunden.
 - MINDESTANLAGE_ROH: Exakter Wortlaut aus dem Prospekt mit Seitenangabe, Format "S.<Nr>: <Text>"
+- MINDESTANLAGE_QUELLE: Von welcher Hierarchie-Ebene stammt der Wert
 
 BEKANNTE ISINs IN DIESEM FONDS:
 {isin_list}
 
 === AUSGABE (NUR JSON, kein weiterer Text) ===
 {
-  "fondstyp":      "exakt ein Wert aus FONDSTYP-Liste",
-  "fondstyp_roh":  "S.<Nr>: exakte Formulierung aus dem Prospekt vor dem Mapping",
-  "anlegertyp":    "exakt ein Wert aus ANLEGERTYP-Liste",
-  "anlegertyp_roh":"S.<Nr>: exakte Formulierung aus dem Prospekt vor dem Mapping",
-  "kundentyp":     "exakt ein Wert aus KUNDENTYP-Liste",
-  "kundentyp_roh": "S.<Nr>: exakte Formulierung aus dem Prospekt vor dem Mapping",
+  "fondstyp":       "exakt ein Wert aus FONDSTYP-Liste",
+  "fondstyp_roh":   "S.<Nr>: exakte Formulierung aus dem Prospekt vor dem Mapping",
+  "fondstyp_quelle":"Subfonds|Umbrella|nicht gefunden",
   "anteilsklassen": [
     {
-      "isin":               "ISIN oder leer wenn nicht zuordenbar",
-      "anteilsklasse_name": "Klassenname aus dem Prospekt",
-      "segmentierung":      "retail|institutional|qualified|mixed|unklar",
-      "begruendung":        "max. 200 Zeichen — warum diese Kategorie",
-      "mindestanlage":      "Betrag + Währung, z.B. '10.000 CHF' (leer wenn nicht gefunden)",
-      "mindestanlage_roh":  "S.<Nr>: exakter Wortlaut aus dem Prospekt"
+      "isin":                 "ISIN oder leer wenn nicht zuordenbar",
+      "anteilsklasse_name":   "Klassenname aus dem Prospekt",
+      "info_quelle":          "ISIN-spezifisch|Anteilsklasse|Subfonds|Umbrella|nicht gefunden",
+      "anlegertyp":           "exakt ein Wert aus ANLEGERTYP-Liste (leer wenn nicht klassenspezifisch gefunden)",
+      "anlegertyp_roh":       "S.<Nr>: exakter Wortlaut nur für diese Klasse",
+      "kundentyp":            "exakt ein Wert aus KUNDENTYP-Liste (leer wenn nicht klassenspezifisch gefunden)",
+      "kundentyp_roh":        "S.<Nr>: exakter Wortlaut nur für diese Klasse",
+      "segmentierung":        "retail|institutional|qualified|mixed|unklar",
+      "begruendung":          "max. 200 Zeichen — warum diese Kategorie",
+      "mindestanlage":        "Betrag + Währung, z.B. '10.000 CHF' (leer wenn nicht gefunden)",
+      "mindestanlage_roh":    "S.<Nr>: exakter Wortlaut aus dem Prospekt",
+      "mindestanlage_quelle": "ISIN-spezifisch|Anteilsklasse|Subfonds|Umbrella|nicht gefunden"
     }
   ]
 }"""
@@ -124,6 +158,7 @@ _STATUS_TEXT = {
 }
 
 _COLS = [
+    ("pdf",       "PDF",                40, "center"),
     ("name",      "Subfonds / Name",   270, "w"),
     ("umbrella",  "Umbrella",          170, "w"),
     ("total",     "ISINs",              55, "center"),
@@ -131,6 +166,30 @@ _COLS = [
     ("status",    "Status",            125, "w"),
     ("last_date", "Letzte Analyse",    140, "w"),
 ]
+
+
+class _Tooltip:
+    def __init__(self, widget, text: str):
+        self._tip = None
+        widget.bind("<Enter>", lambda e: self._show(e, text))
+        widget.bind("<Leave>", lambda e: self._hide())
+
+    def _show(self, event, text: str):
+        x = event.widget.winfo_rootx() + 20
+        y = event.widget.winfo_rooty() + event.widget.winfo_height() + 4
+        self._tip = tw = tk.Toplevel(event.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tw, text=text, justify="left",
+            bg="#2e2e42", fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=6, wraplength=340,
+        ).pack()
+
+    def _hide(self):
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
 
 
 class ProspektAnalysisWindow(tk.Toplevel):
@@ -181,29 +240,47 @@ class ProspektAnalysisWindow(tk.Toplevel):
         )
         self.btn_stop.pack(side="right", padx=(4, 0))
 
-        tk.Button(
+        btn_reset = tk.Button(
             inner, text="⚠ Grosse PDFs zurücksetzen",
             command=self._reset_large_pdfs,
             bg="#2e1a00", fg=ACCENT_YELLOW, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
             activebackground=BTN_ACTIVE,
-        ).pack(side="right", padx=(4, 0))
+        )
+        btn_reset.pack(side="right", padx=(4, 0))
+        _Tooltip(btn_reset,
+            "Setzt LLM-Analyseergebnisse zurück für ISINs, deren PDF mehr als\n"
+            "2000 Seiten hat und noch nicht automatisch gekürzt wurde.\n"
+            "Die Analyse kann danach erneut gestartet werden.")
 
-        tk.Button(
+        btn_prompt = tk.Button(
             inner, text="✏  Prompt",
             command=self._open_prompt_editor,
             bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
             activebackground=BTN_ACTIVE,
-        ).pack(side="right", padx=(4, 0))
+        )
+        btn_prompt.pack(side="right", padx=(4, 0))
+        _Tooltip(btn_prompt,
+            "Öffnet den Prompt-Editor.\n"
+            "Hier kann der LLM-Prompt angepasst werden, den das System zur\n"
+            "Analyse der Prospekte verwendet. Änderungen gelten ab dem\n"
+            "nächsten Analysestart. Mit 'Zurücksetzen' wird der Standard-\n"
+            "Prompt wiederhergestellt.")
 
-        tk.Button(
+        btn_werte = tk.Button(
             inner, text="📋  Werte",
             command=self._open_typologie,
             bg=BTN_BG, fg=ACCENT_YELLOW, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
             activebackground=BTN_ACTIVE,
-        ).pack(side="right", padx=(4, 0))
+        )
+        btn_werte.pack(side="right", padx=(4, 0))
+        _Tooltip(btn_werte,
+            "Öffnet die Wertelisten (Typologie).\n"
+            "Hier können die erlaubten Werte für Fondstyp, Anlegertyp und\n"
+            "Kundentyp verwaltet werden. Diese Werte werden im LLM-Prompt\n"
+            "als Vorgaben für das Mapping verwendet.")
 
         tk.Label(
             inner, text="Modell:",
@@ -292,6 +369,27 @@ class ProspektAnalysisWindow(tk.Toplevel):
             activebackground=BG_MAIN, activeforeground=FG_TEXT,
             font=("Segoe UI", 9), cursor="hand2",
         ).pack(side="left", padx=(14, 0))
+
+        tk.Label(
+            ctrl, text="🔍", bg=BG_MAIN, fg=FG_MUTED,
+            font=("Segoe UI", 10),
+        ).pack(side="left", padx=(14, 2))
+
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add("write", lambda *_: self._fill_tree())
+        tk.Entry(
+            ctrl, textvariable=self._search_var,
+            bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT,
+            relief="flat", font=("Segoe UI", 9), width=20,
+        ).pack(side="left")
+
+        tk.Button(
+            ctrl, text="✕",
+            command=lambda: self._search_var.set(""),
+            bg=BG_MAIN, fg=FG_MUTED, relief="flat",
+            font=("Segoe UI", 8), padx=2, pady=1,
+            cursor="hand2", activebackground=BG_MAIN,
+        ).pack(side="left", padx=(2, 0))
 
         self._summary_var = tk.StringVar(value="")
         tk.Label(
@@ -447,6 +545,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
     def _fill_tree(self):
         self._tree.delete(*self._tree.get_children())
         only_pending = self._filter_var.get()
+        search = self._search_var.get().strip().lower()
 
         # Sortierung: ausstehend zuerst, dann teilweise, dann analysiert, dann kein PDF
         order = {"pending": 0, "partial": 1, "done": 2, "no_pdf": 3}
@@ -458,9 +557,15 @@ class ProspektAnalysisWindow(tk.Toplevel):
         for item in items:
             if only_pending and item["status"] not in ("pending", "partial"):
                 continue
+            if search and not (
+                search in item["name"].lower() or
+                search in item["umbrella"].lower()
+            ):
+                continue
             pending_disp = str(item["pending"]) if item["has_pdf"] else "—"
             date_disp    = item["last_date"][:16] if item["last_date"] else "—"
             self._tree.insert("", "end", iid=item["key"], values=(
+                "✓" if item["has_pdf"] else "✗",
                 item["name"][:70],
                 item["umbrella"],
                 item["total"],
