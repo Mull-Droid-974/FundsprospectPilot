@@ -1,5 +1,5 @@
 """
-LLM-Abstraktionsschicht: Anthropic Claude + Google Gemini.
+LLM-Abstraktionsschicht: Anthropic Claude + Google Gemini + OpenRouter.
 
 Alle Aufrufe laufen über classify() und validate_key() — der Rest des
 Tools muss nicht wissen, welcher Anbieter gerade aktiv ist.
@@ -15,6 +15,14 @@ from utils import logger
 load_dotenv()
 
 # ─── Unterstützte Modelle pro Anbieter ────────────────────────────
+OPENROUTER_MODELS = [
+    "qwen/qwen-2.5-72b-instruct",
+    "meta-llama/llama-3.3-70b-instruct",
+    "mistralai/mistral-large",
+    "deepseek/deepseek-chat",
+    "google/gemma-3-27b-it",
+]
+
 MODELS: dict[str, list[str]] = {
     "anthropic": [
         "claude-haiku-4-5-20251001",
@@ -29,16 +37,19 @@ MODELS: dict[str, list[str]] = {
         "gemini-3-flash-preview",
         "gemini-3-pro-preview",
     ],
+    "openrouter": OPENROUTER_MODELS,
 }
 
 # Standard-Modelle (Batch / Einzel-PDF)
 DEFAULT_BATCH_MODELS = {
-    "anthropic": os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001"),
-    "gemini":    os.getenv("GEMINI_BATCH_MODEL", "gemini-2.5-flash"),
+    "anthropic":  os.getenv("CLAUDE_BATCH_MODEL",       "claude-haiku-4-5-20251001"),
+    "gemini":     os.getenv("GEMINI_BATCH_MODEL",        "gemini-2.5-flash"),
+    "openrouter": os.getenv("OPENROUTER_BATCH_MODEL",    "qwen/qwen-2.5-72b-instruct"),
 }
 DEFAULT_SINGLE_MODELS = {
-    "anthropic": os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6"),
-    "gemini":    os.getenv("GEMINI_SINGLE_MODEL", "gemini-2.5-pro"),
+    "anthropic":  os.getenv("CLAUDE_SINGLE_MODEL",       "claude-sonnet-4-6"),
+    "gemini":     os.getenv("GEMINI_SINGLE_MODEL",        "gemini-2.5-pro"),
+    "openrouter": os.getenv("OPENROUTER_SINGLE_MODEL",   "qwen/qwen-2.5-72b-instruct"),
 }
 
 # Aktiver Anbieter
@@ -64,7 +75,7 @@ def classify(
         additional_context: Ergänzende Informationen (z.B. Web-Suche)
         api_key:            API-Key des Anbieters (leer → aus .env)
         model:              Modellname (leer → Batch-Standard des Anbieters)
-        provider:           "anthropic" | "gemini" (leer → DEFAULT_PROVIDER)
+        provider:           "anthropic" | "gemini" | "openrouter" (leer → DEFAULT_PROVIDER)
 
     Returns:
         Dict mit segmentierung, fondstyp, anlegertyp, kundentyp, begruendung, konfidenz
@@ -92,8 +103,17 @@ def classify(
             api_key=key, model=resolved_model,
         )
 
+    elif p == "openrouter":
+        from openrouter_classifier import classify_with_openrouter
+        key = api_key or os.getenv("OPENROUTER_API_KEY", "")
+        return classify_with_openrouter(
+            text, isin=isin, fund_name=fund_name,
+            additional_context=additional_context,
+            api_key=key, model=resolved_model,
+        )
+
     else:
-        raise ValueError(f"Unbekannter LLM-Anbieter: '{p}'. Erlaubt: anthropic, gemini")
+        raise ValueError(f"Unbekannter LLM-Anbieter: '{p}'. Erlaubt: anthropic, gemini, openrouter")
 
 
 def validate_key(api_key: str, provider: str) -> tuple[bool, str]:
@@ -114,6 +134,10 @@ def validate_key(api_key: str, provider: str) -> tuple[bool, str]:
     elif p == "gemini":
         from gemini_classifier import validate_gemini_key
         return validate_gemini_key(api_key)
+
+    elif p == "openrouter":
+        from openrouter_classifier import validate_openrouter_key
+        return validate_openrouter_key(api_key)
 
     else:
         return False, f"Unbekannter Anbieter: {provider}"

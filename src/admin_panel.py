@@ -177,6 +177,48 @@ class AdminPanel(tk.Toplevel):
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8)
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
+    def _build_tab_openrouter(self, parent):
+        from llm_provider import OPENROUTER_MODELS
+
+        api_frame = self._section(parent, "API-Key (OpenRouter)")
+        api_frame.columnconfigure(1, weight=1)
+        self.var_openrouter_key = tk.StringVar()
+        or_key_entry = self._field(api_frame, "API-Key:", self.var_openrouter_key, 0, show="*")
+        self.validate_or_btn, self.or_key_status = self._key_btn_row(
+            api_frame, or_key_entry,
+            show_cmd=lambda: or_key_entry.config(
+                show="" if or_key_entry.cget("show") else "*"
+            ),
+            validate_cmd=self._validate_openrouter_key,
+            grid_row=1,
+        )
+
+        model_frame = self._section(parent, "Modelle")
+        self.var_or_batch = tk.StringVar()
+        self.var_or_single = tk.StringVar()
+        # state="normal" ermöglicht freie Eingabe (z.B. neue OpenRouter-Modelle)
+        tk.Label(model_frame, text="Batch-Modell:", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 9), anchor="w"
+                 ).grid(row=0, column=0, sticky="w", padx=12, pady=5)
+        cb_batch = ttk.Combobox(model_frame, textvariable=self.var_or_batch,
+                                values=OPENROUTER_MODELS, state="normal",
+                                font=("Segoe UI", 9))
+        cb_batch.grid(row=0, column=1, sticky="ew", padx=(4, 12), pady=5)
+
+        tk.Label(model_frame, text="Einzel-Modell:", bg=BG_PANEL, fg=FG_MUTED,
+                 font=("Segoe UI", 9), anchor="w"
+                 ).grid(row=1, column=0, sticky="w", padx=12, pady=5)
+        cb_single = ttk.Combobox(model_frame, textvariable=self.var_or_single,
+                                 values=OPENROUTER_MODELS, state="normal",
+                                 font=("Segoe UI", 9))
+        cb_single.grid(row=1, column=1, sticky="ew", padx=(4, 12), pady=5)
+
+        tk.Label(
+            model_frame,
+            text="Modell-ID frei eingeben oder aus Liste wählen  |  Alle OpenRouter-Modelle nutzbar",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8)
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
     def _build_tab_system(self, parent):
         proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
         self.var_batch_size = tk.StringVar()
@@ -230,10 +272,11 @@ class AdminPanel(tk.Toplevel):
         nb.pack(fill="both", expand=True, padx=10, pady=(10, 4))
 
         tabs = [
-            ("📁  Dateien",   self._build_tab_dateien),
-            ("🔑  Anthropic", self._build_tab_anthropic),
-            ("🤖  Gemini",    self._build_tab_gemini),
-            ("⚙  System",    self._build_tab_system),
+            ("📁  Dateien",     self._build_tab_dateien),
+            ("🔑  Anthropic",   self._build_tab_anthropic),
+            ("🤖  Gemini",      self._build_tab_gemini),
+            ("🌐  OpenRouter",  self._build_tab_openrouter),
+            ("⚙  System",      self._build_tab_system),
         ]
         for label, builder in tabs:
             tab = tk.Frame(nb, bg=BG_MAIN)
@@ -286,6 +329,9 @@ class AdminPanel(tk.Toplevel):
         from llm_provider import DEFAULT_BATCH_MODELS, DEFAULT_SINGLE_MODELS
         self.var_gemini_batch.set(os.getenv("GEMINI_BATCH_MODEL", DEFAULT_BATCH_MODELS["gemini"]))
         self.var_gemini_single.set(os.getenv("GEMINI_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["gemini"]))
+        self.var_openrouter_key.set(os.getenv("OPENROUTER_API_KEY", ""))
+        self.var_or_batch.set(os.getenv("OPENROUTER_BATCH_MODEL", DEFAULT_BATCH_MODELS["openrouter"]))
+        self.var_or_single.set(os.getenv("OPENROUTER_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["openrouter"]))
 
     def _validate_key(self):
         key = self.var_key.get().strip()
@@ -333,6 +379,31 @@ class AdminPanel(tk.Toplevel):
     def _on_gemini_validate_done(self, ok: bool):
         self.validate_gemini_btn.config(state="normal")
         self.gemini_key_status.config(
+            text="✔ Gültig" if ok else "✘ Ungültig",
+            fg=ACCENT_GREEN if ok else ACCENT_RED,
+        )
+
+    def _validate_openrouter_key(self):
+        key = self.var_openrouter_key.get().strip()
+        if not key:
+            self.or_key_status.config(text="Kein Key eingegeben", fg=ACCENT_YELLOW)
+            return
+        self.or_key_status.config(text="Wird geprüft...", fg=FG_MUTED)
+        self.validate_or_btn.config(state="disabled")
+
+        def check():
+            try:
+                from llm_provider import validate_key
+                ok, _ = validate_key(key, "openrouter")
+            except Exception:
+                ok = False
+            self.after(0, lambda: self._on_or_validate_done(ok))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _on_or_validate_done(self, ok: bool):
+        self.validate_or_btn.config(state="normal")
+        self.or_key_status.config(
             text="✔ Gültig" if ok else "✘ Ungültig",
             fg=ACCENT_GREEN if ok else ACCENT_RED,
         )
@@ -389,6 +460,14 @@ class AdminPanel(tk.Toplevel):
 
         set_key(".env", "GEMINI_BATCH_MODEL", self.var_gemini_batch.get())
         set_key(".env", "GEMINI_SINGLE_MODEL", self.var_gemini_single.get())
+
+        or_key = self.var_openrouter_key.get().strip()
+        if or_key:
+            set_key(".env", "OPENROUTER_API_KEY", or_key)
+            os.environ["OPENROUTER_API_KEY"] = or_key
+
+        set_key(".env", "OPENROUTER_BATCH_MODEL", self.var_or_batch.get())
+        set_key(".env", "OPENROUTER_SINGLE_MODEL", self.var_or_single.get())
 
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.", parent=self)
         self.destroy()

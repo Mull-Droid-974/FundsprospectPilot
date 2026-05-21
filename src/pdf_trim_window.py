@@ -57,6 +57,7 @@ Kürze den folgenden Prospekt-Text auf die für die Anteilsklassen-Klassifizieru
 relevanten Abschnitte.
 
 BEHALTEN (vollständig):
+- Abschnitts-Überschriften und Fondsnamen (Umbrella-Fonds, Subfonds) als struktureller Kontext
 - Anteilsklassen-Tabellen mit ISIN, Mindestanlage, Währung, TER
 - Anleger-Beschränkungen und Zulassungskriterien
 - Regulatorische Klassifizierungen (MiFID, KAG/FIDLEG, UCITS, AIFMD)
@@ -103,6 +104,8 @@ class _TrimWorker(threading.Thread):
     def _call_llm(self, text: str) -> str:
         if self._provider == "gemini":
             return self._call_llm_gemini(text)
+        if self._provider == "openrouter":
+            return self._call_llm_openrouter(text)
         return self._call_llm_anthropic(text)
 
     def _call_llm_anthropic(self, text: str) -> str:
@@ -148,6 +151,28 @@ class _TrimWorker(threading.Thread):
                 raise RuntimeError("Ungültiger Gemini API-Key — bitte im Admin konfigurieren.")
             raise RuntimeError(f"Gemini API-Fehler: {exc}")
         return response.text if hasattr(response, "text") else ""
+
+    def _call_llm_openrouter(self, text: str) -> str:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("openai nicht installiert. Bitte: pip install openai")
+        client = OpenAI(api_key=self._api_key, base_url="https://openrouter.ai/api/v1")
+        try:
+            response = client.chat.completions.create(
+                model=self._model,
+                max_tokens=8192,
+                messages=[
+                    {"role": "system", "content": self._prompt},
+                    {"role": "user",   "content": text[:80_000]},
+                ],
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "401" in msg or "invalid_api_key" in msg.lower() or "authentication" in msg.lower():
+                raise RuntimeError("Ungültiger OpenRouter API-Key — bitte im Admin konfigurieren.")
+            raise RuntimeError(f"OpenRouter API-Fehler: {exc}")
+        return (response.choices[0].message.content or "") if response.choices else ""
 
     def run(self):
         try:
@@ -224,6 +249,8 @@ class _BatchTrimWorker(threading.Thread):
     def _call_llm(self, text: str) -> str:
         if self._provider == "gemini":
             return self._call_llm_gemini(text)
+        if self._provider == "openrouter":
+            return self._call_llm_openrouter(text)
         return self._call_llm_anthropic(text)
 
     def _call_llm_anthropic(self, text: str) -> str:
@@ -252,6 +279,22 @@ class _BatchTrimWorker(threading.Thread):
             generation_config={"max_output_tokens": 8192},
         )
         return response.text if hasattr(response, "text") else ""
+
+    def _call_llm_openrouter(self, text: str) -> str:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("openai nicht installiert. Bitte: pip install openai")
+        client = OpenAI(api_key=self._api_key, base_url="https://openrouter.ai/api/v1")
+        response = client.chat.completions.create(
+            model=self._model,
+            max_tokens=8192,
+            messages=[
+                {"role": "system", "content": self._prompt},
+                {"role": "user",   "content": text[:80_000]},
+            ],
+        )
+        return (response.choices[0].message.content or "") if response.choices else ""
 
     def stop(self):
         self._stop_flag = True
@@ -405,7 +448,7 @@ class PdfTrimWindow(tk.Toplevel):
         self._provider_var = tk.StringVar(value="anthropic")
         provider_combo = ttk.Combobox(
             inner, textvariable=self._provider_var,
-            values=["anthropic", "gemini"], state="readonly", width=10,
+            values=["anthropic", "gemini", "openrouter"], state="readonly", width=12,
             font=("Segoe UI", 9),
         )
         provider_combo.pack(side="right", padx=(2, 0))
@@ -713,11 +756,13 @@ class PdfTrimWindow(tk.Toplevel):
             return
 
         provider = self._provider_var.get()
-        api_key = os.getenv("GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY", "")
-        key_label = "GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+        _key_env = {"gemini": "GOOGLE_API_KEY", "openrouter": "OPENROUTER_API_KEY"}.get(
+            provider, "ANTHROPIC_API_KEY"
+        )
+        api_key = os.getenv(_key_env, "")
         if not api_key:
             messagebox.showerror("API-Key fehlt",
-                                 f"Kein {key_label} in .env gefunden.",
+                                 f"Kein {_key_env} in .env gefunden.",
                                  parent=self)
             return
 
@@ -749,11 +794,13 @@ class PdfTrimWindow(tk.Toplevel):
             return
 
         provider = self._provider_var.get()
-        api_key = os.getenv("GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY", "")
-        key_label = "GOOGLE_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+        _key_env = {"gemini": "GOOGLE_API_KEY", "openrouter": "OPENROUTER_API_KEY"}.get(
+            provider, "ANTHROPIC_API_KEY"
+        )
+        api_key = os.getenv(_key_env, "")
         if not api_key:
             messagebox.showerror("API-Key fehlt",
-                                 f"Kein {key_label} in .env gefunden.",
+                                 f"Kein {_key_env} in .env gefunden.",
                                  parent=self)
             return
 

@@ -55,7 +55,14 @@ class DownloadWindow(tk.Toplevel):
         self._all_rows: list[dict] = []
         self._iid_to_rows: dict[str, list[dict]] = {}
 
+        # Filter state
+        self._search_var = tk.StringVar()
+        self._filter_ok      = tk.BooleanVar(value=True)
+        self._filter_missing = tk.BooleanVar(value=True)
+        self._filter_nf      = tk.BooleanVar(value=True)
+
         self._build_ui()
+        self._search_var.trace_add("write", lambda *_: self._apply_filter())
         self._refresh_table()
         self._poll_queue()
 
@@ -120,6 +127,46 @@ class DownloadWindow(tk.Toplevel):
         self.btn_sel.pack(side="right", padx=(4, 0))
 
         ttk.Separator(self, orient="horizontal").pack(fill="x")
+
+        # Filter-Zeile
+        flt = tk.Frame(self, bg=BG_MAIN)
+        flt.pack(fill="x", padx=12, pady=(6, 2))
+
+        tk.Label(flt, text="Suche:", bg=BG_MAIN, fg=FG_MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        tk.Entry(
+            flt, textvariable=self._search_var,
+            bg=BG_INPUT, fg=FG_TEXT, insertbackground=FG_TEXT,
+            font=("Segoe UI", 9), relief="flat", bd=4, width=22,
+        ).pack(side="left")
+
+        tk.Button(
+            flt, text="✕", command=self._clear_filter,
+            bg=BTN_BG, fg=FG_MUTED, relief="flat",
+            font=("Segoe UI", 8), padx=4, pady=1, cursor="hand2",
+        ).pack(side="left", padx=(2, 12))
+
+        tk.Label(flt, text="Filter:", bg=BG_MAIN, fg=FG_MUTED,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+
+        for var, label, sel_bg, sel_fg in [
+            (self._filter_ok,      "✓ PDF",        "#1a2e1a", ACCENT_GREEN),
+            (self._filter_missing, "— Fehlend",    BG_PANEL,  FG_TEXT),
+            (self._filter_nf,      "✗ Nicht gef.", "#2e1a1a", ACCENT_RED),
+        ]:
+            tk.Checkbutton(
+                flt, text=label, variable=var,
+                command=self._apply_filter,
+                indicatoron=0,
+                bg=BTN_BG, fg=FG_MUTED,
+                selectcolor=sel_bg, activebackground=BTN_ACTIVE,
+                activeforeground=sel_fg,
+                font=("Segoe UI", 9), padx=8, pady=3, cursor="hand2", relief="flat",
+            ).pack(side="left", padx=(0, 4))
+
+        self._match_label = tk.Label(flt, text="", bg=BG_MAIN, fg=FG_MUTED,
+                                     font=("Segoe UI", 8))
+        self._match_label.pack(side="right")
 
         # Fortschrittszeile
         prog_frame = tk.Frame(self, bg=BG_MAIN)
@@ -207,7 +254,46 @@ class DownloadWindow(tk.Toplevel):
 
     def _refresh_table(self):
         self._all_rows = results_store.get_all_results()
-        self._populate_tree(self._all_rows)
+        self._apply_filter()
+
+    def _apply_filter(self):
+        q = self._search_var.get().strip().lower()
+        show_ok      = self._filter_ok.get()
+        show_missing = self._filter_missing.get()
+        show_nf      = self._filter_nf.get()
+
+        filtered = []
+        for row in self._all_rows:
+            tag, _ = self._row_status(row)
+            if tag == "ok"        and not show_ok:      continue
+            if tag == "missing"   and not show_missing:  continue
+            if tag == "not_found" and not show_nf:       continue
+            if q:
+                haystack = " ".join(filter(None, [
+                    row.get("isin"),
+                    row.get("subfonds_name"),
+                    row.get("umbrella_id"),
+                    row.get("fondsname"),
+                    row.get("anteilsklasse"),
+                ])).lower()
+                if q not in haystack:
+                    continue
+            filtered.append(row)
+
+        self._populate_tree(filtered)
+        total = len(self._all_rows)
+        shown = len(filtered)
+        self._match_label.config(
+            text=f"{shown} / {total} ISINs" if shown < total else f"{total} ISINs",
+            fg=ACCENT_YELLOW if shown < total else FG_MUTED,
+        )
+
+    def _clear_filter(self):
+        self._search_var.set("")
+        self._filter_ok.set(True)
+        self._filter_missing.set(True)
+        self._filter_nf.set(True)
+        self._apply_filter()
 
     def _group_rows(self, rows: list[dict]) -> dict:
         """Gruppiert Zeilen nach umbrella_id → subfonds_name."""

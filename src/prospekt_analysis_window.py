@@ -303,7 +303,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
         self._provider_var = tk.StringVar(value="anthropic")
         provider_combo = ttk.Combobox(
             inner, textvariable=self._provider_var,
-            values=["anthropic", "gemini"], state="readonly", width=10,
+            values=["anthropic", "gemini", "openrouter"], state="readonly", width=12,
             font=("Segoe UI", 9),
         )
         provider_combo.pack(side="right")
@@ -647,16 +647,15 @@ class ProspektAnalysisWindow(tk.Toplevel):
             return
         self._batch_errors = []
         provider = self._provider_var.get()
-        if provider == "gemini":
-            api_key = os.getenv("GOOGLE_API_KEY", "")
-            key_label = "GOOGLE_API_KEY"
-        else:
-            api_key = os.getenv("ANTHROPIC_API_KEY", "")
-            key_label = "ANTHROPIC_API_KEY"
+        _key_env = {
+            "gemini":     "GOOGLE_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+        }.get(provider, "ANTHROPIC_API_KEY")
+        api_key = os.getenv(_key_env, "")
         if not api_key:
             messagebox.showerror(
                 "API-Key fehlt",
-                f"Kein {key_label} in .env gefunden.\n"
+                f"Kein {_key_env} in .env gefunden.\n"
                 "Bitte im Admin-Bereich konfigurieren.",
                 parent=self,
             )

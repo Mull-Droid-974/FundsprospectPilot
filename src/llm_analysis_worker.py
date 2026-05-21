@@ -141,6 +141,8 @@ class LLMAnalysisWorker(threading.Thread):
         prompt = self._prompt_template.replace("{isin_list}", isin_list)
         if self._provider == "gemini":
             return self._call_llm_gemini(pdf_text, prompt)
+        if self._provider == "openrouter":
+            return self._call_llm_openrouter(pdf_text, prompt)
         return self._call_llm_anthropic(pdf_text, prompt)
 
     def _call_llm_anthropic(self, pdf_text: str, prompt: str) -> dict | None:
@@ -202,6 +204,33 @@ class LLMAnalysisWorker(threading.Thread):
             raise RuntimeError(f"Gemini API-Fehler: {exc}")
 
         raw = response.text if hasattr(response, "text") else ""
+        return self._parse_response(raw)
+
+    def _call_llm_openrouter(self, pdf_text: str, prompt: str) -> dict | None:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("openai nicht installiert. Bitte: pip install openai")
+
+        client = OpenAI(api_key=self._api_key, base_url="https://openrouter.ai/api/v1")
+        try:
+            response = client.chat.completions.create(
+                model=self._model,
+                max_tokens=8192,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user",   "content": f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}"},
+                ],
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "401" in msg or "invalid_api_key" in msg.lower() or "authentication" in msg.lower():
+                raise RuntimeError("Ungültiger OpenRouter API-Key — bitte im Admin konfigurieren.")
+            if "429" in msg or "rate_limit" in msg.lower() or "quota" in msg.lower():
+                raise _RateLimitRetry()
+            raise RuntimeError(f"OpenRouter API-Fehler: {exc}")
+
+        raw = (response.choices[0].message.content or "") if response.choices else ""
         return self._parse_response(raw)
 
     def _parse_response(self, text: str) -> dict | None:
