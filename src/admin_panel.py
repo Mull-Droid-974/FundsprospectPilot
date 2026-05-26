@@ -540,7 +540,7 @@ class AdminPanel(tk.Toplevel):
         threading.Thread(target=run, daemon=True).start()
 
     def _discover_ms_endpoints(self):
-        """Testet die Well-Known-Discovery und zeigt das Ergebnis an."""
+        """Testet Discovery + Registration und zeigt Ergebnis an."""
         self._ms_discover_btn.config(state="disabled")
         self.ms_status.config(text="Discovery läuft...", fg=FG_MUTED)
 
@@ -550,29 +550,37 @@ class AdminPanel(tk.Toplevel):
             lines = []
             mcp_base = "https://mcp.morningstar.com"
 
+            # Well-Known Proben
             for path in ["/.well-known/oauth-protected-resource/mcp",
                          "/.well-known/oauth-protected-resource"]:
                 url = urljoin(mcp_base, path)
                 try:
                     r = _req.get(url, timeout=10)
                     lines.append(f"GET {url}")
-                    lines.append(f"  → HTTP {r.status_code}")
-                    if r.ok:
-                        lines.append(f"  → {r.text[:500]}")
-                    else:
-                        lines.append(f"  → {r.text[:200]}")
+                    lines.append(f"  → HTTP {r.status_code}  {r.text[:400]}")
                 except Exception as e:
-                    lines.append(f"GET {url}")
-                    lines.append(f"  → Fehler: {e}")
+                    lines.append(f"GET {url}  → Fehler: {e}")
 
+            # Endpoints ermitteln
             try:
-                from morningstar_client import discover_auth_endpoints
+                from morningstar_client import discover_auth_endpoints, _try_dynamic_registration
                 eps = discover_auth_endpoints()
                 lines.append("\n--- Entdeckte Endpoints ---")
                 for k, v in eps.items():
                     lines.append(f"  {k}: {v}")
+
+                # Registrierung testen
+                reg_ep = eps.get("registration_endpoint", "")
+                lines.append(f"\n--- Dynamic Registration ---")
+                lines.append(f"  Endpoint: {reg_ep or '(keiner)'}")
+                if reg_ep:
+                    cid, err = _try_dynamic_registration(reg_ep, "http://localhost:7777/callback")
+                    if cid:
+                        lines.append(f"  → client_id: {cid}")
+                    else:
+                        lines.append(f"  → FEHLER: {err}")
             except Exception as e:
-                lines.append(f"\n--- Discovery-Fehler ---\n  {e}")
+                lines.append(f"\n--- Fehler ---\n  {e}")
 
             result = "\n".join(lines)
             self.after(0, lambda: self._on_ms_discover_done(result))

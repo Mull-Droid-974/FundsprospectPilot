@@ -159,14 +159,13 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _try_dynamic_registration(registration_endpoint: str, redirect_uri: str) -> str:
+def _try_dynamic_registration(registration_endpoint: str, redirect_uri: str) -> tuple[str, str]:
     """
     Dynamische Client-Registrierung (RFC 7591).
-    Registriert mit der exakten redirect_uri die im Auth-Flow verwendet wird.
-    Gibt client_id zurück oder ''.
+    Returns: (client_id, error_detail) — einer davon ist immer leer.
     """
     if not registration_endpoint:
-        return ""
+        return "", "Kein registration_endpoint bekannt"
     try:
         resp = requests.post(
             registration_endpoint,
@@ -185,11 +184,11 @@ def _try_dynamic_registration(registration_endpoint: str, redirect_uri: str) -> 
             cid = resp.json().get("client_id", "")
             if cid:
                 logger.info(f"Dynamic Registration erfolgreich: client_id={cid[:8]}...")
-            return cid
-        logger.warning(f"Dynamic Registration fehlgeschlagen: HTTP {resp.status_code} — {resp.text[:200]}")
+                return cid, ""
+            return "", f"Registrierung OK aber kein client_id in Antwort: {resp.text[:300]}"
+        return "", f"HTTP {resp.status_code}: {resp.text[:300]}"
     except Exception as exc:
-        logger.warning(f"Dynamic Registration Fehler: {exc}")
-    return ""
+        return "", f"Verbindungsfehler: {exc}"
 
 
 def login_via_browser(
@@ -219,10 +218,21 @@ def login_via_browser(
     verifier, challenge = _pkce_pair()
 
     # Dynamic Registration mit exakter redirect_uri (falls noch keine client_id)
+    reg_error = ""
     if not client_id and registration_endpoint:
-        client_id = _try_dynamic_registration(registration_endpoint, redirect_uri)
+        client_id, reg_error = _try_dynamic_registration(registration_endpoint, redirect_uri)
         if client_id:
             logger.info(f"Verwende dynamisch registrierte client_id: {client_id[:8]}...")
+        else:
+            logger.warning(f"Dynamic Registration fehlgeschlagen: {reg_error}")
+
+    if not client_id:
+        raise RuntimeError(
+            f"Kein OAuth2 Client-ID verfügbar.\n\n"
+            f"Registrierungsversuch: {reg_error or 'kein registration_endpoint'}\n\n"
+            f"Lösung: Eine Client-ID von Morningstar (developer.morningstar.com) "
+            f"beziehen und im Admin-Panel eintragen."
+        )
 
     result: dict = {}
     done = threading.Event()
