@@ -251,12 +251,18 @@ class AdminPanel(tk.Toplevel):
         url_frame.columnconfigure(1, weight=1)
         self.var_ms_token_url = tk.StringVar()
         self._field(url_frame, "Token-URL:", self.var_ms_token_url, 0)
+        tk.Button(
+            url_frame, text="🔍  Ermitteln",
+            command=self._discover_ms_token_url,
+            bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
+            font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2",
+        ).grid(row=0, column=2, padx=(4, 8), pady=5)
         tk.Label(
             url_frame,
-            text="MCP-Endpoint: mcp.morningstar.com/mcp (fest, kein Feld notwendig)",
+            text="MCP-Endpoint: mcp.morningstar.com/mcp (fest)  |  Token-URL via '🔍 Ermitteln' auto-befüllbar",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
             wraplength=440, justify="left"
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 8))
 
     def _build_tab_system(self, parent):
         proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
@@ -451,20 +457,47 @@ class AdminPanel(tk.Toplevel):
             fg=ACCENT_GREEN if ok else ACCENT_RED,
         )
 
+    def _discover_ms_token_url(self):
+        """Ermittelt die Token-URL via MCP Well-Known-Discovery und befüllt das Feld."""
+        self.ms_status.config(text="Ermittle Token-URL...", fg=FG_MUTED)
+        self.validate_ms_btn.config(state="disabled")
+
+        def run():
+            try:
+                from morningstar_client import discover_token_url
+                url = discover_token_url()
+                self.after(0, lambda: self._on_ms_discover_done(url, None))
+            except Exception as exc:
+                self.after(0, lambda: self._on_ms_discover_done(None, str(exc)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_ms_discover_done(self, url: str | None, error: str | None):
+        self.validate_ms_btn.config(state="normal")
+        if url:
+            self.var_ms_token_url.set(url)
+            self.ms_status.config(text="✔ Token-URL ermittelt", fg=ACCENT_GREEN)
+        else:
+            self.ms_status.config(text=f"✘ Discovery: {(error or '')[:70]}", fg=ACCENT_RED)
+
     def _validate_ms_connection(self):
         client_id = self.var_ms_client_id.get().strip()
         client_secret = self.var_ms_client_secret.get().strip()
         token_url = self.var_ms_token_url.get().strip()
-        if not all([client_id, client_secret, token_url]):
-            self.ms_status.config(text="Client ID, Secret und Token-URL erforderlich", fg=ACCENT_YELLOW)
+        if not all([client_id, client_secret]):
+            self.ms_status.config(text="Client ID und Client Secret erforderlich", fg=ACCENT_YELLOW)
             return
         self.ms_status.config(text="Verbindung wird geprüft...", fg=FG_MUTED)
         self.validate_ms_btn.config(state="disabled")
 
         def check():
             try:
-                from morningstar_client import get_token, list_mcp_tools
-                token = get_token(client_id, client_secret, token_url)
+                from morningstar_client import discover_token_url, get_token, list_mcp_tools
+                t_url = token_url
+                if not t_url:
+                    t_url = discover_token_url()
+                    self.after(0, lambda u=t_url: self.var_ms_token_url.set(u))
+                token = get_token(client_id, client_secret, t_url)
                 tools = list_mcp_tools(token)
                 names = [t["name"] for t in tools]
                 ok = True

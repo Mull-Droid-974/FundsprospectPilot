@@ -19,6 +19,7 @@ from utils import logger
 
 # Fester MCP-Endpoint — kein Admin-Feld notwendig
 MCP_ENDPOINT = os.getenv("MORNINGSTAR_MCP_URL", "https://mcp.morningstar.com/mcp")
+MCP_BASE     = "https://mcp.morningstar.com"   # Basis für Well-Known-Discovery
 
 # ─── Verfügbare Datapoints ───────────────────────────────────────────────────
 AVAILABLE_DATAPOINTS: dict[str, tuple[str, str]] = {
@@ -53,7 +54,63 @@ DEFAULT_SELECTED: list[str] = [
 _BATCH_SIZE = 20
 
 
-# ─── OAuth2 ──────────────────────────────────────────────────────────────────
+# ─── OAuth2 & Discovery ──────────────────────────────────────────────────────
+
+def discover_token_url(mcp_base: str = MCP_BASE) -> str:
+    """
+    Ermittelt die OAuth2 Token-URL automatisch via MCP Well-Known-Discovery.
+
+    Ablauf (RFC 9728 → RFC 8414):
+      1. GET {mcp_base}/.well-known/oauth-protected-resource[/mcp]
+         → authorization_servers[0].issuer
+      2. GET {issuer}/.well-known/oauth-authorization-server
+         → token_endpoint
+
+    Raises:
+        RuntimeError: wenn Discovery fehlschlägt
+    """
+    from urllib.parse import urljoin
+
+    # Schritt 1: Protected Resource Metadata
+    issuer = None
+    for path in ["/.well-known/oauth-protected-resource/mcp",
+                 "/.well-known/oauth-protected-resource"]:
+        try:
+            resp = requests.get(urljoin(mcp_base, path), timeout=10)
+            if resp.ok:
+                meta = resp.json()
+                servers = meta.get("authorization_servers") or []
+                if servers:
+                    entry = servers[0]
+                    issuer = (entry.get("issuer") or entry) if isinstance(entry, dict) else entry
+                    break
+        except Exception:
+            continue
+
+    if not issuer:
+        raise RuntimeError(
+            "MCP-Discovery fehlgeschlagen: /.well-known/oauth-protected-resource "
+            "lieferte keinen authorization_servers-Eintrag."
+        )
+
+    # Schritt 2: Authorization Server Metadata
+    for path in ["/.well-known/oauth-authorization-server",
+                 "/.well-known/openid-configuration"]:
+        try:
+            resp = requests.get(urljoin(issuer, path), timeout=10)
+            if resp.ok:
+                meta = resp.json()
+                token_url = meta.get("token_endpoint")
+                if token_url:
+                    logger.info(f"Morningstar Token-URL entdeckt: {token_url}")
+                    return token_url
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        f"token_endpoint nicht in Auth-Server-Metadaten gefunden (Issuer: {issuer})"
+    )
+
 
 def get_token(client_id: str, client_secret: str, token_url: str) -> str:
     """
