@@ -249,6 +249,13 @@ class AdminPanel(tk.Toplevel):
         )
         self._ms_discover_btn.pack(side="left", padx=(6, 0))
 
+        tk.Button(
+            btn_row, text="🗑 Reset",
+            command=self._reset_ms_tokens,
+            bg=BTN_BG, fg=ACCENT_RED, relief="flat",
+            font=("Segoe UI", 8), padx=8, pady=4, cursor="hand2",
+        ).pack(side="left", padx=(6, 0))
+
         self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
         self.ms_status.pack(side="left", padx=(10, 0))
 
@@ -258,9 +265,9 @@ class AdminPanel(tk.Toplevel):
         self._field(cid_frame, "Client-ID:", self.var_ms_client_id, 0)
         tk.Label(
             cid_frame,
-            text="Leer lassen für automatische Registrierung.\n"
-                 "Morningstar-Entwicklerportal: developer.morningstar.com",
-            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
+            text="Keine E-Mail-Adresse — das ist eine technische OAuth2-App-ID.\n"
+                 "Leer lassen: automatische Registrierung wird versucht.",
+            bg=BG_PANEL, fg=ACCENT_YELLOW, font=("Segoe UI", 8),
             justify="left", anchor="w",
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
@@ -482,8 +489,12 @@ class AdminPanel(tk.Toplevel):
                     raise RuntimeError("Kein authorization_endpoint in Auth-Server-Metadaten.")
 
                 # Client-ID: manuell eingegeben > gecacht > Dynamic Registration
-                client_id = (self.var_ms_client_id.get().strip()
-                             or os.getenv("MORNINGSTAR_CLIENT_ID", ""))
+                # E-Mail-Adressen sind keine gültigen OAuth2 Client-IDs → ignorieren
+                def _valid_client_id(v: str) -> str:
+                    return v if v and "@" not in v else ""
+
+                client_id = (_valid_client_id(self.var_ms_client_id.get().strip())
+                             or _valid_client_id(os.getenv("MORNINGSTAR_CLIENT_ID", "")))
                 if not client_id and endpoints.get("registration_endpoint"):
                     client_id = _try_dynamic_registration(endpoints["registration_endpoint"])
                     if client_id:
@@ -609,6 +620,20 @@ class AdminPanel(tk.Toplevel):
             )
         else:
             self._ms_login_status.config(text="— Nicht angemeldet", fg=FG_MUTED)
+
+    def _reset_ms_tokens(self):
+        """Löscht alle gespeicherten Morningstar-Tokens und Client-ID aus .env."""
+        env_path = Path(".env")
+        if not env_path.exists():
+            env_path.write_text("")
+        for key in ("MORNINGSTAR_ACCESS_TOKEN", "MORNINGSTAR_REFRESH_TOKEN",
+                    "MORNINGSTAR_TOKEN_EXPIRES", "MORNINGSTAR_TOKEN_URL",
+                    "MORNINGSTAR_CLIENT_ID"):
+            set_key(str(env_path), key, "")
+            os.environ.pop(key, None)
+        self.var_ms_client_id.set("")
+        self.ms_status.config(text="✔ Tokens gelöscht — bitte neu anmelden", fg=ACCENT_YELLOW)
+        self._refresh_ms_login_status()
 
     def _delete_all_data(self):
         try:
