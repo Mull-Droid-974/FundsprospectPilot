@@ -247,18 +247,16 @@ class AdminPanel(tk.Toplevel):
         self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
         self.ms_status.pack(side="left", padx=(8, 0))
 
-        url_frame = self._section(parent, "Endpoint-URLs")
+        url_frame = self._section(parent, "Endpoint-Konfiguration")
         url_frame.columnconfigure(1, weight=1)
         self.var_ms_token_url = tk.StringVar()
-        self.var_ms_data_url = tk.StringVar()
         self._field(url_frame, "Token-URL:", self.var_ms_token_url, 0)
-        self._field(url_frame, "Daten-URL:", self.var_ms_data_url, 1)
         tk.Label(
             url_frame,
-            text="Endpoint-URLs aus der Morningstar Direct Web Services Dokumentation entnehmen.",
+            text="MCP-Endpoint: mcp.morningstar.com/mcp (fest, kein Feld notwendig)",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
             wraplength=440, justify="left"
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
     def _build_tab_system(self, parent):
         proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
@@ -377,7 +375,6 @@ class AdminPanel(tk.Toplevel):
         self.var_ms_client_id.set(os.getenv("MORNINGSTAR_CLIENT_ID", ""))
         self.var_ms_client_secret.set(os.getenv("MORNINGSTAR_CLIENT_SECRET", ""))
         self.var_ms_token_url.set(os.getenv("MORNINGSTAR_TOKEN_URL", ""))
-        self.var_ms_data_url.set(os.getenv("MORNINGSTAR_DATA_URL", ""))
 
     def _validate_key(self):
         key = self.var_key.get().strip()
@@ -466,13 +463,16 @@ class AdminPanel(tk.Toplevel):
 
         def check():
             try:
-                from morningstar_client import get_token
-                get_token(client_id, client_secret, token_url)
-                ok, msg = True, "✔ Token erhalten"
+                from morningstar_client import get_token, list_mcp_tools
+                token = get_token(client_id, client_secret, token_url)
+                tools = list_mcp_tools(token)
+                names = [t["name"] for t in tools]
+                ok = True
+                msg = f"✔ Verbunden — {len(tools)} Tools: {', '.join(names[:4])}"
             except ValueError as exc:
                 ok, msg = False, f"✘ {exc}"
             except Exception as exc:
-                ok, msg = False, f"✘ {str(exc)[:60]}"
+                ok, msg = False, f"✘ {str(exc)[:80]}"
             self.after(0, lambda: self._on_ms_validate_done(ok, msg))
 
         threading.Thread(target=check, daemon=True).start()
@@ -556,11 +556,6 @@ class AdminPanel(tk.Toplevel):
         if ms_token_url:
             set_key(".env", "MORNINGSTAR_TOKEN_URL", ms_token_url)
             os.environ["MORNINGSTAR_TOKEN_URL"] = ms_token_url
-
-        ms_data_url = self.var_ms_data_url.get().strip()
-        if ms_data_url:
-            set_key(".env", "MORNINGSTAR_DATA_URL", ms_data_url)
-            os.environ["MORNINGSTAR_DATA_URL"] = ms_data_url
 
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.", parent=self)
         self.destroy()

@@ -54,7 +54,7 @@ _TREE_COLS = [
 # ─── Worker ──────────────────────────────────────────────────────────────────
 
 class MorningstarWorker(threading.Thread):
-    """Ruft Morningstar-Daten für eine Liste von ISINs ab."""
+    """Ruft Morningstar-Daten für eine Liste von ISINs via MCP ab."""
 
     def __init__(
         self,
@@ -63,20 +63,18 @@ class MorningstarWorker(threading.Thread):
         client_id: str,
         client_secret: str,
         token_url: str,
-        data_url: str,
         result_queue: queue.Queue,
     ):
         super().__init__(daemon=True)
-        self._isins        = isins
-        self._field_keys   = field_keys
-        self._client_id    = client_id
+        self._isins         = isins
+        self._field_keys    = field_keys
+        self._client_id     = client_id
         self._client_secret = client_secret
-        self._token_url    = token_url
-        self._data_url     = data_url
-        self._queue        = result_queue
-        self._stop_flag    = False
-        self._done         = 0
-        self._failed       = 0
+        self._token_url     = token_url
+        self._queue         = result_queue
+        self._stop_flag     = False
+        self._done          = 0
+        self._failed        = 0
 
     def stop(self):
         self._stop_flag = True
@@ -87,7 +85,8 @@ class MorningstarWorker(threading.Thread):
     def run(self):
         total = len(self._isins)
         try:
-            self._emit("log", f"Starte Abruf für {total} ISINs …")
+            self._emit("log", f"Starte MCP-Abruf für {total} ISINs …")
+            self._emit("log", f"Endpoint: {morningstar_client.MCP_ENDPOINT}")
 
             # Token holen
             self._emit("log", "Hole OAuth2 Token …")
@@ -101,7 +100,15 @@ class MorningstarWorker(threading.Thread):
                 self._emit("done", (0, 0, total))
                 return
 
-            # Batch-Verarbeitung
+            # MCP-Tools entdecken (einmalig, für Log-Ausgabe)
+            try:
+                tools = morningstar_client.list_mcp_tools(token)
+                names = [t["name"] for t in tools]
+                self._emit("log", f"Verfügbare MCP-Tools ({len(tools)}): {', '.join(names)}")
+            except Exception as exc:
+                self._emit("log", f"⚠ Tool-Listing nicht verfügbar: {exc}")
+
+            # Batch-Verarbeitung (je Batch eine MCP-Session)
             batch_size = morningstar_client._BATCH_SIZE
             for i in range(0, total, batch_size):
                 if self._stop_flag:
@@ -111,7 +118,7 @@ class MorningstarWorker(threading.Thread):
 
                 try:
                     results = morningstar_client.fetch_datapoints(
-                        batch, self._field_keys, token, self._data_url
+                        batch, self._field_keys, token
                     )
                 except (ValueError, RuntimeError) as exc:
                     self._emit("error", str(exc))
@@ -129,7 +136,7 @@ class MorningstarWorker(threading.Thread):
                         self._emit("log", f"  ✓ {isin}: {cat}")
                     else:
                         self._failed += 1
-                        self._emit("log", f"  — {isin}: keine Daten von API")
+                        self._emit("log", f"  — {isin}: keine Daten von MCP")
 
                     self._emit("progress", (self._done, self._failed, total))
 
@@ -423,21 +430,20 @@ class MorningstarWindow(tk.Toplevel):
 
     # ─── Worker starten ──────────────────────────────────────────────────────
 
-    def _credentials(self) -> tuple[str, str, str, str] | None:
-        """Gibt (client_id, client_secret, token_url, data_url) zurück oder None."""
-        cid    = os.getenv("MORNINGSTAR_CLIENT_ID", "")
-        csec   = os.getenv("MORNINGSTAR_CLIENT_SECRET", "")
-        turl   = os.getenv("MORNINGSTAR_TOKEN_URL", "")
-        durl   = os.getenv("MORNINGSTAR_DATA_URL", "")
-        if not all([cid, csec, turl, durl]):
+    def _credentials(self) -> tuple[str, str, str] | None:
+        """Gibt (client_id, client_secret, token_url) zurück oder None."""
+        cid  = os.getenv("MORNINGSTAR_CLIENT_ID", "")
+        csec = os.getenv("MORNINGSTAR_CLIENT_SECRET", "")
+        turl = os.getenv("MORNINGSTAR_TOKEN_URL", "")
+        if not all([cid, csec, turl]):
             messagebox.showerror(
                 "Konfiguration fehlt",
-                "Bitte Morningstar Client ID, Client Secret, Token-URL und\n"
-                "Daten-URL im Admin-Panel unter '🌟 Morningstar' konfigurieren.",
+                "Bitte Morningstar Client ID, Client Secret und Token-URL\n"
+                "im Admin-Panel unter '🌟 Morningstar' konfigurieren.",
                 parent=self,
             )
             return None
-        return cid, csec, turl, durl
+        return cid, csec, turl
 
     def _selected_field_keys(self) -> list[str]:
         return [k for k, v in self._selected_keys.items() if v.get()]
@@ -484,7 +490,7 @@ class MorningstarWindow(tk.Toplevel):
         self._launch_worker(isins, *creds)
 
     def _launch_worker(self, isins: list[str], client_id: str,
-                       client_secret: str, token_url: str, data_url: str):
+                       client_secret: str, token_url: str):
         if self._worker and self._worker.is_alive():
             return
         field_keys = self._selected_field_keys()
@@ -495,7 +501,7 @@ class MorningstarWindow(tk.Toplevel):
             return
         self._event_queue = queue.Queue()
         self._worker = MorningstarWorker(
-            isins, field_keys, client_id, client_secret, token_url, data_url,
+            isins, field_keys, client_id, client_secret, token_url,
             self._event_queue,
         )
         self._worker.start()
