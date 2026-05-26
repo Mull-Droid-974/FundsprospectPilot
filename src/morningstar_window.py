@@ -60,21 +60,21 @@ class MorningstarWorker(threading.Thread):
         self,
         isins: list[str],
         field_keys: list[str],
-        client_id: str,
-        client_secret: str,
+        username: str,
+        password: str,
         token_url: str,
         result_queue: queue.Queue,
     ):
         super().__init__(daemon=True)
-        self._isins         = isins
-        self._field_keys    = field_keys
-        self._client_id     = client_id
-        self._client_secret = client_secret
-        self._token_url     = token_url
-        self._queue         = result_queue
-        self._stop_flag     = False
-        self._done          = 0
-        self._failed        = 0
+        self._isins      = isins
+        self._field_keys = field_keys
+        self._username   = username
+        self._password   = password
+        self._token_url  = token_url
+        self._queue      = result_queue
+        self._stop_flag  = False
+        self._done       = 0
+        self._failed     = 0
 
     def stop(self):
         self._stop_flag = True
@@ -92,7 +92,7 @@ class MorningstarWorker(threading.Thread):
             self._emit("log", "Hole OAuth2 Token …")
             try:
                 token = morningstar_client.get_token(
-                    self._client_id, self._client_secret, self._token_url
+                    self._username, self._password, self._token_url
                 )
                 self._emit("log", "✓ Token erhalten")
             except (ValueError, RuntimeError) as exc:
@@ -431,19 +431,33 @@ class MorningstarWindow(tk.Toplevel):
     # ─── Worker starten ──────────────────────────────────────────────────────
 
     def _credentials(self) -> tuple[str, str, str] | None:
-        """Gibt (client_id, client_secret, token_url) zurück oder None."""
-        cid  = os.getenv("MORNINGSTAR_CLIENT_ID", "")
-        csec = os.getenv("MORNINGSTAR_CLIENT_SECRET", "")
-        turl = os.getenv("MORNINGSTAR_TOKEN_URL", "")
-        if not all([cid, csec, turl]):
+        """Gibt (username, password, token_url) zurück oder None."""
+        username = os.getenv("MORNINGSTAR_USERNAME", "")
+        password = os.getenv("MORNINGSTAR_PASSWORD", "")
+        turl     = os.getenv("MORNINGSTAR_TOKEN_URL", "")
+        if not all([username, password]):
             messagebox.showerror(
                 "Konfiguration fehlt",
-                "Bitte Morningstar Client ID, Client Secret und Token-URL\n"
-                "im Admin-Panel unter '🌟 Morningstar' konfigurieren.",
+                "Bitte E-Mail und Passwort im Admin-Panel unter '🌟 Morningstar' konfigurieren.",
                 parent=self,
             )
             return None
-        return cid, csec, turl
+        # Token-URL bei Bedarf auto-ermitteln
+        if not turl:
+            try:
+                turl = morningstar_client.discover_token_url()
+                from dotenv import set_key
+                set_key(".env", "MORNINGSTAR_TOKEN_URL", turl)
+                import os as _os
+                _os.environ["MORNINGSTAR_TOKEN_URL"] = turl
+            except Exception as exc:
+                messagebox.showerror(
+                    "Token-URL nicht ermittelbar",
+                    f"Bitte Token-URL manuell im Admin-Panel eingeben:\n{exc}",
+                    parent=self,
+                )
+                return None
+        return username, password, turl
 
     def _selected_field_keys(self) -> list[str]:
         return [k for k, v in self._selected_keys.items() if v.get()]

@@ -3,10 +3,10 @@ Morningstar MCP Client.
 
 Verbindet mit dem offiziellen Morningstar MCP Server (mcp.morningstar.com)
 via Model Context Protocol (JSON-RPC über HTTP, Streamable-HTTP-Transport).
-Authentifizierung via OAuth2 Client Credentials Flow.
+Authentifizierung via OAuth2 Resource Owner Password Grant (E-Mail + Passwort).
 
-Endpoint ist fest: https://mcp.morningstar.com/mcp
-Token-URL muss im Admin-Panel konfiguriert werden.
+MCP-Endpoint ist fest: https://mcp.morningstar.com/mcp
+Token-URL wird automatisch via Well-Known-Discovery ermittelt.
 """
 
 import json
@@ -112,24 +112,24 @@ def discover_token_url(mcp_base: str = MCP_BASE) -> str:
     )
 
 
-def get_token(client_id: str, client_secret: str, token_url: str) -> str:
+def get_token(username: str, password: str, token_url: str) -> str:
     """
-    Holt einen OAuth2 Bearer Token via Client Credentials Flow.
+    Holt einen OAuth2 Bearer Token via Resource Owner Password Grant (E-Mail + Passwort).
 
     Raises:
         ValueError:   bei ungültigen Credentials (401/403)
         RuntimeError: bei anderen Fehlern
     """
-    if not all([client_id, client_secret, token_url]):
-        raise ValueError("Client ID, Client Secret und Token-URL müssen konfiguriert sein.")
+    if not all([username, password, token_url]):
+        raise ValueError("E-Mail, Passwort und Token-URL müssen konfiguriert sein.")
 
     try:
         resp = requests.post(
             token_url,
             data={
-                "grant_type":    "client_credentials",
-                "client_id":     client_id,
-                "client_secret": client_secret,
+                "grant_type": "password",
+                "username":   username,
+                "password":   password,
             },
             headers={"Accept": "application/json"},
             timeout=30,

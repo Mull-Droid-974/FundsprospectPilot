@@ -220,19 +220,19 @@ class AdminPanel(tk.Toplevel):
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
     def _build_tab_morningstar(self, parent):
-        api_frame = self._section(parent, "OAuth2 Credentials (Morningstar Direct)")
+        api_frame = self._section(parent, "Morningstar Direct — Login")
         api_frame.columnconfigure(1, weight=1)
-        self.var_ms_client_id = tk.StringVar()
-        self.var_ms_client_secret = tk.StringVar()
-        self._field(api_frame, "Client ID:", self.var_ms_client_id, 0)
-        ms_secret_entry = self._field(api_frame, "Client Secret:", self.var_ms_client_secret, 1, show="*")
+        self.var_ms_username = tk.StringVar()
+        self.var_ms_password = tk.StringVar()
+        self._field(api_frame, "E-Mail:", self.var_ms_username, 0)
+        ms_pw_entry = self._field(api_frame, "Passwort:", self.var_ms_password, 1, show="*")
 
         btn_row = tk.Frame(api_frame, bg=BG_PANEL)
         btn_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 8))
         tk.Button(
             btn_row, text="🔑  Anzeigen / Verbergen",
-            command=lambda: ms_secret_entry.config(
-                show="" if ms_secret_entry.cget("show") else "*"
+            command=lambda: ms_pw_entry.config(
+                show="" if ms_pw_entry.cget("show") else "*"
             ),
             bg=BTN_BG, fg=FG_MUTED, relief="flat",
             font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
@@ -378,8 +378,8 @@ class AdminPanel(tk.Toplevel):
         self.var_openrouter_key.set(os.getenv("OPENROUTER_API_KEY", ""))
         self.var_or_batch.set(os.getenv("OPENROUTER_BATCH_MODEL", DEFAULT_BATCH_MODELS["openrouter"]))
         self.var_or_single.set(os.getenv("OPENROUTER_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["openrouter"]))
-        self.var_ms_client_id.set(os.getenv("MORNINGSTAR_CLIENT_ID", ""))
-        self.var_ms_client_secret.set(os.getenv("MORNINGSTAR_CLIENT_SECRET", ""))
+        self.var_ms_username.set(os.getenv("MORNINGSTAR_USERNAME", ""))
+        self.var_ms_password.set(os.getenv("MORNINGSTAR_PASSWORD", ""))
         self.var_ms_token_url.set(os.getenv("MORNINGSTAR_TOKEN_URL", ""))
 
     def _validate_key(self):
@@ -481,11 +481,11 @@ class AdminPanel(tk.Toplevel):
             self.ms_status.config(text=f"✘ Discovery: {(error or '')[:70]}", fg=ACCENT_RED)
 
     def _validate_ms_connection(self):
-        client_id = self.var_ms_client_id.get().strip()
-        client_secret = self.var_ms_client_secret.get().strip()
+        username = self.var_ms_username.get().strip()
+        password = self.var_ms_password.get().strip()
         token_url = self.var_ms_token_url.get().strip()
-        if not all([client_id, client_secret]):
-            self.ms_status.config(text="Client ID und Client Secret erforderlich", fg=ACCENT_YELLOW)
+        if not all([username, password]):
+            self.ms_status.config(text="E-Mail und Passwort erforderlich", fg=ACCENT_YELLOW)
             return
         self.ms_status.config(text="Verbindung wird geprüft...", fg=FG_MUTED)
         self.validate_ms_btn.config(state="disabled")
@@ -497,7 +497,7 @@ class AdminPanel(tk.Toplevel):
                 if not t_url:
                     t_url = discover_token_url()
                     self.after(0, lambda u=t_url: self.var_ms_token_url.set(u))
-                token = get_token(client_id, client_secret, t_url)
+                token = get_token(username, password, t_url)
                 tools = list_mcp_tools(token)
                 names = [t["name"] for t in tools]
                 ok = True
@@ -575,15 +575,15 @@ class AdminPanel(tk.Toplevel):
         set_key(".env", "OPENROUTER_BATCH_MODEL", self.var_or_batch.get())
         set_key(".env", "OPENROUTER_SINGLE_MODEL", self.var_or_single.get())
 
-        ms_client_id = self.var_ms_client_id.get().strip()
-        if ms_client_id:
-            set_key(".env", "MORNINGSTAR_CLIENT_ID", ms_client_id)
-            os.environ["MORNINGSTAR_CLIENT_ID"] = ms_client_id
+        ms_username = self.var_ms_username.get().strip()
+        if ms_username:
+            set_key(".env", "MORNINGSTAR_USERNAME", ms_username)
+            os.environ["MORNINGSTAR_USERNAME"] = ms_username
 
-        ms_client_secret = self.var_ms_client_secret.get().strip()
-        if ms_client_secret:
-            set_key(".env", "MORNINGSTAR_CLIENT_SECRET", ms_client_secret)
-            os.environ["MORNINGSTAR_CLIENT_SECRET"] = ms_client_secret
+        ms_password = self.var_ms_password.get().strip()
+        if ms_password:
+            set_key(".env", "MORNINGSTAR_PASSWORD", ms_password)
+            os.environ["MORNINGSTAR_PASSWORD"] = ms_password
 
         ms_token_url = self.var_ms_token_url.get().strip()
         if ms_token_url:
