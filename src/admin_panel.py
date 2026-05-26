@@ -220,49 +220,38 @@ class AdminPanel(tk.Toplevel):
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
     def _build_tab_morningstar(self, parent):
-        api_frame = self._section(parent, "Morningstar Direct — Login")
-        api_frame.columnconfigure(1, weight=1)
-        self.var_ms_username = tk.StringVar()
-        self.var_ms_password = tk.StringVar()
-        self._field(api_frame, "E-Mail:", self.var_ms_username, 0)
-        ms_pw_entry = self._field(api_frame, "Passwort:", self.var_ms_password, 1, show="*")
+        login_frame = self._section(parent, "Morningstar Direct — Browser-Login")
+        login_frame.columnconfigure(0, weight=1)
 
-        btn_row = tk.Frame(api_frame, bg=BG_PANEL)
-        btn_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 8))
-        tk.Button(
-            btn_row, text="🔑  Anzeigen / Verbergen",
-            command=lambda: ms_pw_entry.config(
-                show="" if ms_pw_entry.cget("show") else "*"
-            ),
-            bg=BTN_BG, fg=FG_MUTED, relief="flat",
-            font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
-        ).pack(side="left")
-        self.validate_ms_btn = tk.Button(
-            btn_row, text="✔  Verbindung testen",
-            command=self._validate_ms_connection,
-            bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
-            font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
+        self._ms_login_status = tk.Label(
+            login_frame, text="— Nicht angemeldet",
+            bg=BG_PANEL, fg=FG_MUTED,
+            font=("Segoe UI", 9), anchor="w",
         )
-        self.validate_ms_btn.pack(side="left", padx=(6, 0))
-        self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
-        self.ms_status.pack(side="left", padx=(8, 0))
+        self._ms_login_status.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
 
-        url_frame = self._section(parent, "Endpoint-Konfiguration")
-        url_frame.columnconfigure(1, weight=1)
-        self.var_ms_token_url = tk.StringVar()
-        self._field(url_frame, "Token-URL:", self.var_ms_token_url, 0)
-        tk.Button(
-            url_frame, text="🔍  Ermitteln",
-            command=self._discover_ms_token_url,
-            bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
-            font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2",
-        ).grid(row=0, column=2, padx=(4, 8), pady=5)
+        btn_row = tk.Frame(login_frame, bg=BG_PANEL)
+        btn_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+
+        self.validate_ms_btn = tk.Button(
+            btn_row, text="🌐  Im Browser anmelden",
+            command=self._login_ms_browser,
+            bg="#1a2e1a", fg=ACCENT_GREEN, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=4, cursor="hand2",
+        )
+        self.validate_ms_btn.pack(side="left")
+
+        self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
+        self.ms_status.pack(side="left", padx=(10, 0))
+
+        info_frame = self._section(parent, "MCP-Endpoint")
         tk.Label(
-            url_frame,
-            text="MCP-Endpoint: mcp.morningstar.com/mcp (fest)  |  Token-URL via '🔍 Ermitteln' auto-befüllbar",
+            info_frame,
+            text="Endpoint: mcp.morningstar.com/mcp (fest)\n"
+                 "Auth-Endpoints und Client-ID werden automatisch via Well-Known-Discovery ermittelt.",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
-            wraplength=440, justify="left"
-        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 8))
+            justify="left", anchor="w", wraplength=460,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(6, 10))
 
     def _build_tab_system(self, parent):
         proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
@@ -378,9 +367,7 @@ class AdminPanel(tk.Toplevel):
         self.var_openrouter_key.set(os.getenv("OPENROUTER_API_KEY", ""))
         self.var_or_batch.set(os.getenv("OPENROUTER_BATCH_MODEL", DEFAULT_BATCH_MODELS["openrouter"]))
         self.var_or_single.set(os.getenv("OPENROUTER_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["openrouter"]))
-        self.var_ms_username.set(os.getenv("MORNINGSTAR_USERNAME", ""))
-        self.var_ms_password.set(os.getenv("MORNINGSTAR_PASSWORD", ""))
-        self.var_ms_token_url.set(os.getenv("MORNINGSTAR_TOKEN_URL", ""))
+        self._refresh_ms_login_status()
 
     def _validate_key(self):
         key = self.var_key.get().strip()
@@ -457,62 +444,96 @@ class AdminPanel(tk.Toplevel):
             fg=ACCENT_GREEN if ok else ACCENT_RED,
         )
 
-    def _discover_ms_token_url(self):
-        """Ermittelt die Token-URL via MCP Well-Known-Discovery und befüllt das Feld."""
-        self.ms_status.config(text="Ermittle Token-URL...", fg=FG_MUTED)
+    def _login_ms_browser(self):
+        """Startet den OAuth2 Authorization Code + PKCE Browser-Login."""
         self.validate_ms_btn.config(state="disabled")
+        self.ms_status.config(text="Ermittle Auth-Endpoints...", fg=FG_MUTED)
 
         def run():
             try:
-                from morningstar_client import discover_token_url
-                url = discover_token_url()
-                self.after(0, lambda: self._on_ms_discover_done(url, None))
+                from morningstar_client import (
+                    discover_auth_endpoints, _try_dynamic_registration, login_via_browser
+                )
+                endpoints = discover_auth_endpoints()
+
+                if not endpoints.get("authorization_endpoint"):
+                    raise RuntimeError("Kein authorization_endpoint in Auth-Server-Metadaten.")
+
+                # Client-ID: gecacht oder per Dynamic Registration
+                client_id = os.getenv("MORNINGSTAR_CLIENT_ID", "")
+                if not client_id and endpoints.get("registration_endpoint"):
+                    client_id = _try_dynamic_registration(endpoints["registration_endpoint"])
+                    if client_id:
+                        set_key(".env", "MORNINGSTAR_CLIENT_ID", client_id)
+                        os.environ["MORNINGSTAR_CLIENT_ID"] = client_id
+
+                self.after(0, lambda: self.ms_status.config(
+                    text="Browser geöffnet — bitte bei Morningstar anmelden...",
+                    fg=ACCENT_YELLOW,
+                ))
+
+                tokens = login_via_browser(
+                    auth_url=endpoints["authorization_endpoint"],
+                    token_url=endpoints["token_endpoint"],
+                    client_id=client_id,
+                )
+
+                # Token + Ablaufzeit speichern
+                from datetime import datetime, timedelta
+                access_token = tokens["access_token"]
+                expires_in   = int(tokens.get("expires_in", 3600))
+                expires_at   = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
+                refresh_tok  = tokens.get("refresh_token", "")
+
+                for key, val in [
+                    ("MORNINGSTAR_ACCESS_TOKEN",  access_token),
+                    ("MORNINGSTAR_TOKEN_EXPIRES", expires_at),
+                    ("MORNINGSTAR_TOKEN_URL",     endpoints["token_endpoint"]),
+                ]:
+                    set_key(".env", key, val)
+                    os.environ[key] = val
+                if refresh_tok:
+                    set_key(".env", "MORNINGSTAR_REFRESH_TOKEN", refresh_tok)
+                    os.environ["MORNINGSTAR_REFRESH_TOKEN"] = refresh_tok
+
+                msg = f"✔ Angemeldet — Token gültig ~{expires_in // 60} Min."
+                self.after(0, lambda: self._on_ms_login_done(True, msg))
+
             except Exception as exc:
-                self.after(0, lambda: self._on_ms_discover_done(None, str(exc)))
+                self.after(0, lambda e=str(exc): self._on_ms_login_done(False, e))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_ms_discover_done(self, url: str | None, error: str | None):
+    def _on_ms_login_done(self, ok: bool, msg: str):
         self.validate_ms_btn.config(state="normal")
-        if url:
-            self.var_ms_token_url.set(url)
-            self.ms_status.config(text="✔ Token-URL ermittelt", fg=ACCENT_GREEN)
-        else:
-            self.ms_status.config(text=f"✘ Discovery: {(error or '')[:70]}", fg=ACCENT_RED)
+        self.ms_status.config(text=msg[:90], fg=ACCENT_GREEN if ok else ACCENT_RED)
+        if ok:
+            self._refresh_ms_login_status()
 
-    def _validate_ms_connection(self):
-        username = self.var_ms_username.get().strip()
-        password = self.var_ms_password.get().strip()
-        token_url = self.var_ms_token_url.get().strip()
-        if not all([username, password]):
-            self.ms_status.config(text="E-Mail und Passwort erforderlich", fg=ACCENT_YELLOW)
-            return
-        self.ms_status.config(text="Verbindung wird geprüft...", fg=FG_MUTED)
-        self.validate_ms_btn.config(state="disabled")
-
-        def check():
+    def _refresh_ms_login_status(self):
+        token = os.getenv("MORNINGSTAR_ACCESS_TOKEN", "")
+        expires_str = os.getenv("MORNINGSTAR_TOKEN_EXPIRES", "")
+        if token and expires_str:
             try:
-                from morningstar_client import discover_token_url, get_token, list_mcp_tools
-                t_url = token_url
-                if not t_url:
-                    t_url = discover_token_url()
-                    self.after(0, lambda u=t_url: self.var_ms_token_url.set(u))
-                token = get_token(username, password, t_url)
-                tools = list_mcp_tools(token)
-                names = [t["name"] for t in tools]
-                ok = True
-                msg = f"✔ Verbunden — {len(tools)} Tools: {', '.join(names[:4])}"
-            except ValueError as exc:
-                ok, msg = False, f"✘ {exc}"
-            except Exception as exc:
-                ok, msg = False, f"✘ {str(exc)[:80]}"
-            self.after(0, lambda: self._on_ms_validate_done(ok, msg))
-
-        threading.Thread(target=check, daemon=True).start()
-
-    def _on_ms_validate_done(self, ok: bool, msg: str):
-        self.validate_ms_btn.config(state="normal")
-        self.ms_status.config(text=msg, fg=ACCENT_GREEN if ok else ACCENT_RED)
+                from datetime import datetime
+                expires = datetime.fromisoformat(expires_str)
+                remaining = int((expires - datetime.now()).total_seconds() / 60)
+                if remaining > 0:
+                    self._ms_login_status.config(
+                        text=f"✔ Angemeldet — noch ~{remaining} Min. gültig",
+                        fg=ACCENT_GREEN,
+                    )
+                    return
+                self._ms_login_status.config(text="⚠ Token abgelaufen", fg=ACCENT_YELLOW)
+                return
+            except Exception:
+                pass
+        if token:
+            self._ms_login_status.config(
+                text="✔ Token vorhanden (Gültigkeit unbekannt)", fg=ACCENT_YELLOW
+            )
+        else:
+            self._ms_login_status.config(text="— Nicht angemeldet", fg=FG_MUTED)
 
     def _delete_all_data(self):
         try:
@@ -574,21 +595,6 @@ class AdminPanel(tk.Toplevel):
 
         set_key(".env", "OPENROUTER_BATCH_MODEL", self.var_or_batch.get())
         set_key(".env", "OPENROUTER_SINGLE_MODEL", self.var_or_single.get())
-
-        ms_username = self.var_ms_username.get().strip()
-        if ms_username:
-            set_key(".env", "MORNINGSTAR_USERNAME", ms_username)
-            os.environ["MORNINGSTAR_USERNAME"] = ms_username
-
-        ms_password = self.var_ms_password.get().strip()
-        if ms_password:
-            set_key(".env", "MORNINGSTAR_PASSWORD", ms_password)
-            os.environ["MORNINGSTAR_PASSWORD"] = ms_password
-
-        ms_token_url = self.var_ms_token_url.get().strip()
-        if ms_token_url:
-            set_key(".env", "MORNINGSTAR_TOKEN_URL", ms_token_url)
-            os.environ["MORNINGSTAR_TOKEN_URL"] = ms_token_url
 
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.", parent=self)
         self.destroy()

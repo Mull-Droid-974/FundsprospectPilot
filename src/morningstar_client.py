@@ -9,9 +9,18 @@ MCP-Endpoint ist fest: https://mcp.morningstar.com/mcp
 Token-URL wird automatisch via Well-Known-Discovery ermittelt.
 """
 
+import base64
+import hashlib
 import json
 import os
+import secrets
+import socket
+import threading
+import webbrowser
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 
@@ -54,24 +63,23 @@ DEFAULT_SELECTED: list[str] = [
 _BATCH_SIZE = 20
 
 
-# ─── OAuth2 & Discovery ──────────────────────────────────────────────────────
+# ─── OAuth2 Discovery & Browser-Login ───────────────────────────────────────
 
-def discover_token_url(mcp_base: str = MCP_BASE) -> str:
+def discover_auth_endpoints(mcp_base: str = MCP_BASE) -> dict:
     """
-    Ermittelt die OAuth2 Token-URL automatisch via MCP Well-Known-Discovery.
+    Ermittelt alle OAuth2-Endpoints via MCP Well-Known-Discovery (RFC 9728 → RFC 8414).
 
-    Ablauf (RFC 9728 → RFC 8414):
-      1. GET {mcp_base}/.well-known/oauth-protected-resource[/mcp]
-         → authorization_servers[0].issuer
-      2. GET {issuer}/.well-known/oauth-authorization-server
-         → token_endpoint
-
+    Returns:
+        {
+          "issuer": str,
+          "authorization_endpoint": str,
+          "token_endpoint": str,
+          "registration_endpoint": str,   # leer wenn nicht vorhanden
+        }
     Raises:
         RuntimeError: wenn Discovery fehlschlägt
     """
-    from urllib.parse import urljoin
-
-    # Schritt 1: Protected Resource Metadata
+    # Schritt 1: Protected Resource Metadata → Issuer-URL
     issuer = None
     for path in ["/.well-known/oauth-protected-resource/mcp",
                  "/.well-known/oauth-protected-resource"]:
@@ -93,61 +101,200 @@ def discover_token_url(mcp_base: str = MCP_BASE) -> str:
             "lieferte keinen authorization_servers-Eintrag."
         )
 
-    # Schritt 2: Authorization Server Metadata
+    # Schritt 2: Authorization Server Metadata → alle Endpoints
     for path in ["/.well-known/oauth-authorization-server",
                  "/.well-known/openid-configuration"]:
         try:
             resp = requests.get(urljoin(issuer, path), timeout=10)
             if resp.ok:
                 meta = resp.json()
-                token_url = meta.get("token_endpoint")
-                if token_url:
-                    logger.info(f"Morningstar Token-URL entdeckt: {token_url}")
-                    return token_url
+                if meta.get("token_endpoint"):
+                    logger.info(f"Morningstar Auth-Endpoints entdeckt (Issuer: {issuer})")
+                    return {
+                        "issuer":                  issuer,
+                        "authorization_endpoint":  meta.get("authorization_endpoint", ""),
+                        "token_endpoint":          meta.get("token_endpoint", ""),
+                        "registration_endpoint":   meta.get("registration_endpoint", ""),
+                    }
         except Exception:
             continue
 
     raise RuntimeError(
-        f"token_endpoint nicht in Auth-Server-Metadaten gefunden (Issuer: {issuer})"
+        f"Auth-Server-Metadaten nicht gefunden (Issuer: {issuer})"
     )
 
 
-def get_token(username: str, password: str, token_url: str) -> str:
-    """
-    Holt einen OAuth2 Bearer Token via Resource Owner Password Grant (E-Mail + Passwort).
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("localhost", 0))
+        return s.getsockname()[1]
 
-    Raises:
-        ValueError:   bei ungültigen Credentials (401/403)
-        RuntimeError: bei anderen Fehlern
+
+def _pkce_pair() -> tuple[str, str]:
+    verifier  = secrets.token_urlsafe(64)
+    digest    = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _try_dynamic_registration(registration_endpoint: str) -> str:
+    """Dynamische Client-Registrierung (RFC 7591). Gibt client_id zurück oder ''."""
+    if not registration_endpoint:
+        return ""
+    try:
+        resp = requests.post(
+            registration_endpoint,
+            json={
+                "client_name":                "FundProspektPilot",
+                "redirect_uris":              ["http://localhost"],
+                "grant_types":                ["authorization_code"],
+                "response_types":             ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=15,
+        )
+        if resp.ok:
+            return resp.json().get("client_id", "")
+    except Exception:
+        pass
+    return ""
+
+
+def login_via_browser(
+    auth_url: str,
+    token_url: str,
+    client_id: str = "",
+    timeout: int = 300,
+) -> dict:
     """
-    if not all([username, password, token_url]):
-        raise ValueError("E-Mail, Passwort und Token-URL müssen konfiguriert sein.")
+    OAuth2 Authorization Code + PKCE via Browser-Login.
+
+    Ablauf:
+      1. Lokaler Callback-Server auf zufälligem Port starten
+      2. Browser mit Auth-URL öffnen → Nutzer meldet sich auf Morningstar-Seite an
+      3. Browser leitet zu localhost/callback → Code empfangen
+      4. Code gegen Access-Token tauschen
+
+    Returns:
+        {"access_token": ..., "refresh_token": ..., "expires_in": ...}
+    Raises:
+        RuntimeError / ValueError bei Fehler oder Timeout
+    """
+    port         = _find_free_port()
+    redirect_uri = f"http://localhost:{port}/callback"
+    state        = secrets.token_urlsafe(16)
+    verifier, challenge = _pkce_pair()
+
+    result: dict = {}
+    done = threading.Event()
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            qs        = parse_qs(urlparse(self.path).query)
+            code      = (qs.get("code")  or [""])[0]
+            got_state = (qs.get("state") or [""])[0]
+            error     = (qs.get("error") or [""])[0]
+
+            if code and got_state == state:
+                result["code"] = code
+                body = "<h2>Anmeldung erfolgreich — dieses Fenster kann geschlossen werden.</h2>"
+            else:
+                result["error"] = error or "state_mismatch"
+                body = "<h2>Anmeldung fehlgeschlagen oder abgebrochen.</h2>"
+
+            body_bytes = f"<html><body>{body}</body></html>".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
+            done.set()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("localhost", port), _Handler)
+    threading.Thread(target=server.handle_request, daemon=True).start()
+
+    params: dict = {
+        "response_type":         "code",
+        "redirect_uri":          redirect_uri,
+        "state":                 state,
+        "code_challenge":        challenge,
+        "code_challenge_method": "S256",
+    }
+    if client_id:
+        params["client_id"] = client_id
+
+    webbrowser.open(f"{auth_url}?{urlencode(params)}")
+    logger.info("Browser für Morningstar-Login geöffnet.")
+
+    if not done.wait(timeout=timeout):
+        server.server_close()
+        raise RuntimeError(
+            f"Timeout: Browser-Login nicht innerhalb von {timeout // 60} Min. abgeschlossen."
+        )
+    server.server_close()
+
+    if "error" in result:
+        raise ValueError(f"Login abgebrochen: {result['error']}")
+
+    # Code gegen Token tauschen
+    data: dict = {
+        "grant_type":   "authorization_code",
+        "code":         result["code"],
+        "redirect_uri": redirect_uri,
+        "code_verifier": verifier,
+    }
+    if client_id:
+        data["client_id"] = client_id
 
     try:
         resp = requests.post(
             token_url,
-            data={
-                "grant_type": "password",
-                "username":   username,
-                "password":   password,
-            },
+            data=data,
             headers={"Accept": "application/json"},
             timeout=30,
         )
     except requests.RequestException as exc:
-        raise RuntimeError(f"Verbindungsfehler zum Token-Endpoint: {exc}")
+        raise RuntimeError(f"Verbindungsfehler beim Token-Tausch: {exc}")
 
-    if resp.status_code in (401, 403):
-        raise ValueError(f"Ungültige Morningstar Credentials (HTTP {resp.status_code}).")
+    if resp.status_code in (400, 401):
+        raise ValueError(f"Token-Tausch abgelehnt (HTTP {resp.status_code}): {resp.text[:200]}")
     if not resp.ok:
         raise RuntimeError(f"Token-Endpoint Fehler {resp.status_code}: {resp.text[:200]}")
 
-    data = resp.json()
-    token = data.get("access_token") or data.get("token")
-    if not token:
-        raise RuntimeError(f"Kein access_token in der Antwort: {list(data.keys())}")
-    logger.info("Morningstar OAuth2-Token erhalten.")
-    return token
+    tokens = resp.json()
+    if not tokens.get("access_token"):
+        raise RuntimeError(f"Kein access_token in der Antwort: {list(tokens.keys())}")
+
+    logger.info("Morningstar: Browser-Login erfolgreich, Token erhalten.")
+    return tokens
+
+
+def refresh_access_token(refresh_token_val: str, token_url: str, client_id: str = "") -> dict:
+    """
+    Erneuert den Access Token via Refresh Token.
+    Returns dict mit access_token (und ggf. neuem refresh_token).
+    """
+    data: dict = {"grant_type": "refresh_token", "refresh_token": refresh_token_val}
+    if client_id:
+        data["client_id"] = client_id
+    try:
+        resp = requests.post(
+            token_url, data=data,
+            headers={"Accept": "application/json"}, timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Verbindungsfehler beim Token-Refresh: {exc}")
+    if not resp.ok:
+        raise RuntimeError(f"Token-Refresh fehlgeschlagen (HTTP {resp.status_code})")
+    return resp.json()
+
+
+# Rückwärtskompatibilität — wird intern nicht mehr verwendet
+discover_token_url = lambda mcp_base=MCP_BASE: discover_auth_endpoints(mcp_base)["token_endpoint"]
 
 
 # ─── MCP-Session ─────────────────────────────────────────────────────────────

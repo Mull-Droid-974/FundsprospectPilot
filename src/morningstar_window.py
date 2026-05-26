@@ -60,17 +60,13 @@ class MorningstarWorker(threading.Thread):
         self,
         isins: list[str],
         field_keys: list[str],
-        username: str,
-        password: str,
-        token_url: str,
+        token: str,
         result_queue: queue.Queue,
     ):
         super().__init__(daemon=True)
         self._isins      = isins
         self._field_keys = field_keys
-        self._username   = username
-        self._password   = password
-        self._token_url  = token_url
+        self._token      = token
         self._queue      = result_queue
         self._stop_flag  = False
         self._done       = 0
@@ -88,21 +84,9 @@ class MorningstarWorker(threading.Thread):
             self._emit("log", f"Starte MCP-Abruf für {total} ISINs …")
             self._emit("log", f"Endpoint: {morningstar_client.MCP_ENDPOINT}")
 
-            # Token holen
-            self._emit("log", "Hole OAuth2 Token …")
-            try:
-                token = morningstar_client.get_token(
-                    self._username, self._password, self._token_url
-                )
-                self._emit("log", "✓ Token erhalten")
-            except (ValueError, RuntimeError) as exc:
-                self._emit("error", str(exc))
-                self._emit("done", (0, 0, total))
-                return
-
             # MCP-Tools entdecken (einmalig, für Log-Ausgabe)
             try:
-                tools = morningstar_client.list_mcp_tools(token)
+                tools = morningstar_client.list_mcp_tools(self._token)
                 names = [t["name"] for t in tools]
                 self._emit("log", f"Verfügbare MCP-Tools ({len(tools)}): {', '.join(names)}")
             except Exception as exc:
@@ -118,7 +102,7 @@ class MorningstarWorker(threading.Thread):
 
                 try:
                     results = morningstar_client.fetch_datapoints(
-                        batch, self._field_keys, token
+                        batch, self._field_keys, self._token
                     )
                 except (ValueError, RuntimeError) as exc:
                     self._emit("error", str(exc))
@@ -430,41 +414,68 @@ class MorningstarWindow(tk.Toplevel):
 
     # ─── Worker starten ──────────────────────────────────────────────────────
 
-    def _credentials(self) -> tuple[str, str, str] | None:
-        """Gibt (username, password, token_url) zurück oder None."""
-        username = os.getenv("MORNINGSTAR_USERNAME", "")
-        password = os.getenv("MORNINGSTAR_PASSWORD", "")
-        turl     = os.getenv("MORNINGSTAR_TOKEN_URL", "")
-        if not all([username, password]):
+    def _credentials(self) -> str | None:
+        """
+        Gibt einen gültigen Access Token zurück oder None.
+        Versucht automatisch, einen abgelaufenen Token via Refresh Token zu erneuern.
+        """
+        from datetime import datetime, timedelta
+
+        token = os.getenv("MORNINGSTAR_ACCESS_TOKEN", "")
+        if not token:
             messagebox.showerror(
-                "Konfiguration fehlt",
-                "Bitte E-Mail und Passwort im Admin-Panel unter '🌟 Morningstar' konfigurieren.",
+                "Nicht angemeldet",
+                "Bitte im Admin-Panel unter '🌟 Morningstar' anmelden\n"
+                "(Schaltfläche '🌐 Im Browser anmelden').",
                 parent=self,
             )
             return None
-        # Token-URL bei Bedarf auto-ermitteln
-        if not turl:
+
+        # Ablauf prüfen
+        expires_str = os.getenv("MORNINGSTAR_TOKEN_EXPIRES", "")
+        if expires_str:
             try:
-                turl = morningstar_client.discover_token_url()
-                from dotenv import set_key
-                set_key(".env", "MORNINGSTAR_TOKEN_URL", turl)
-                import os as _os
-                _os.environ["MORNINGSTAR_TOKEN_URL"] = turl
-            except Exception as exc:
-                messagebox.showerror(
-                    "Token-URL nicht ermittelbar",
-                    f"Bitte Token-URL manuell im Admin-Panel eingeben:\n{exc}",
-                    parent=self,
-                )
-                return None
-        return username, password, turl
+                expires = datetime.fromisoformat(expires_str)
+                if datetime.now() >= expires:
+                    # Refresh versuchen
+                    refresh_tok = os.getenv("MORNINGSTAR_REFRESH_TOKEN", "")
+                    token_url   = os.getenv("MORNINGSTAR_TOKEN_URL", "")
+                    client_id   = os.getenv("MORNINGSTAR_CLIENT_ID", "")
+                    if refresh_tok and token_url:
+                        try:
+                            new = morningstar_client.refresh_access_token(refresh_tok, token_url, client_id)
+                            token = new["access_token"]
+                            new_expires = (datetime.now() + timedelta(seconds=int(new.get("expires_in", 3600)))).isoformat()
+                            from dotenv import set_key as _sk
+                            _sk(".env", "MORNINGSTAR_ACCESS_TOKEN", token)
+                            _sk(".env", "MORNINGSTAR_TOKEN_EXPIRES", new_expires)
+                            os.environ["MORNINGSTAR_ACCESS_TOKEN"] = token
+                            os.environ["MORNINGSTAR_TOKEN_EXPIRES"] = new_expires
+                        except Exception:
+                            messagebox.showwarning(
+                                "Token abgelaufen",
+                                "Morningstar-Token abgelaufen. Bitte im Admin-Panel neu anmelden.",
+                                parent=self,
+                            )
+                            return None
+                    else:
+                        messagebox.showwarning(
+                            "Token abgelaufen",
+                            "Morningstar-Token abgelaufen. Bitte im Admin-Panel neu anmelden.",
+                            parent=self,
+                        )
+                        return None
+            except Exception:
+                pass
+
+        return token
 
     def _selected_field_keys(self) -> list[str]:
         return [k for k, v in self._selected_keys.items() if v.get()]
 
     def _start_missing(self):
-        creds = self._credentials()
-        if not creds:
+        token = self._credentials()
+        if not token:
             return
         isins = morningstar_store.get_isins_without_morningstar()
         if not isins:
@@ -472,11 +483,11 @@ class MorningstarWindow(tk.Toplevel):
                                 "Alle ISINs haben bereits Morningstar-Daten.",
                                 parent=self)
             return
-        self._launch_worker(isins, *creds)
+        self._launch_worker(isins, token)
 
     def _start_selection(self):
-        creds = self._credentials()
-        if not creds:
+        token = self._credentials()
+        if not token:
             return
         isins = [self._tree.item(iid)["values"][0]
                  for iid in self._tree.selection()
@@ -485,11 +496,11 @@ class MorningstarWindow(tk.Toplevel):
             messagebox.showwarning("Keine Auswahl",
                                    "Bitte mindestens eine ISIN markieren.", parent=self)
             return
-        self._launch_worker(isins, *creds)
+        self._launch_worker(isins, token)
 
     def _start_update_all(self):
-        creds = self._credentials()
-        if not creds:
+        token = self._credentials()
+        if not token:
             return
         isins = morningstar_store.get_all_isins()
         if not isins:
@@ -501,10 +512,9 @@ class MorningstarWindow(tk.Toplevel):
             parent=self,
         ):
             return
-        self._launch_worker(isins, *creds)
+        self._launch_worker(isins, token)
 
-    def _launch_worker(self, isins: list[str], client_id: str,
-                       client_secret: str, token_url: str):
+    def _launch_worker(self, isins: list[str], token: str):
         if self._worker and self._worker.is_alive():
             return
         field_keys = self._selected_field_keys()
@@ -515,7 +525,7 @@ class MorningstarWindow(tk.Toplevel):
             return
         self._event_queue = queue.Queue()
         self._worker = MorningstarWorker(
-            isins, field_keys, client_id, client_secret, token_url,
+            isins, field_keys, token,
             self._event_queue,
         )
         self._worker.start()
