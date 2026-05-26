@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FundProspektPilot — System-Flowchart</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      font-family: "Segoe UI", sans-serif;
+      padding: 32px 24px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 1.6rem;
+      color: #89b4fa;
+      margin-bottom: 8px;
+    }
+    p.subtitle {
+      text-align: center;
+      font-size: 0.85rem;
+      color: #7f849c;
+      margin-bottom: 32px;
+    }
+
+    /* Tab navigation */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+    .tab-btn {
+      background: #313145;
+      color: #cdd6f4;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 20px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .tab-btn:hover { background: #45475a; }
+    .tab-btn.active { background: #89b4fa; color: #1e1e2e; font-weight: bold; }
+
+    .diagram-section { display: none; }
+    .diagram-section.active { display: block; }
+
+    .mermaid-wrap {
+      background: #2a2a3e;
+      border-radius: 12px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+    .mermaid-wrap .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+
+    .legend {
+      margin-top: 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: center;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      color: #a6adc8;
+    }
+    .legend-dot {
+      width: 14px; height: 14px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<h1>FundProspektPilot — System-Flowchart</h1>
+<p class="subtitle">Alle Regeln und Abläufe auf einen Blick</p>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="showTab('overview')">Gesamtüberblick</button>
+  <button class="tab-btn" onclick="showTab('download')">Prospekt-Download</button>
+  <button class="tab-btn" onclick="showTab('llm')">LLM-Analyse</button>
+  <button class="tab-btn" onclick="showTab('pdf')">PDF-Extraktion</button>
+  <button class="tab-btn" onclick="showTab('rules')">Klassifizierungsregeln</button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TAB 1 -->
+<div id="tab-overview" class="diagram-section active">
+  <div class="mermaid-wrap">
+    <div class="mermaid">
+flowchart TD
+    A([Start: ISIN-Liste]) --> B[Daten importieren\nExcel / CSV / manuell]
+    B --> C[(SQLite DB\nresults.db)]
+
+    C --> D{Metadaten\nvorhanden?}
+    D -- Nein --> E[Phase 1: Metadaten laden\nfundinfo API]
+    D -- Ja --> F{PDF\nvorhanden?}
+    E --> C
+    E --> F
+
+    F -- Nein --> G[Phase 2: Prospekt-Download\nfundinfo.com]
+    F -- Ja --> H[PDF-Extraktion\npdfplumber + OCR optional]
+    G --> H
+
+    H --> I{PDF > 150 S.?}
+    I -- Ja --> J[PDF-Kürzer\nnutzen]
+    I -- Nein --> K[Text + Tabellen extrahieren]
+    J --> K
+
+    K --> L{.trimmed.txt\nvorhanden?}
+    L -- Ja --> M[Trimmed-Text verwenden]
+    L -- Nein --> N[Keyword-Filter\nrelevante Abschnitte]
+    M --> O[LLM-Analyse]
+    N --> O
+
+    O --> P{Provider}
+    P -- Anthropic --> Q[Claude\nHaiku / Sonnet / Opus]
+    P -- Google --> R[Gemini\nFlash / Pro]
+
+    Q --> S[JSON-Antwort parsen\n& normalisieren]
+    R --> S
+
+    S --> T[(Ergebnis in DB\nspeichern)]
+    T --> U[Ergebnis-Fenster\nSegmentierung anzeigen]
+
+    style A fill:#313145,color:#cdd6f4,stroke:#89b4fa
+    style C fill:#313145,color:#cdd6f4,stroke:#b4befe
+    style T fill:#313145,color:#cdd6f4,stroke:#b4befe
+    style U fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    style J fill:#313145,color:#f9e2af,stroke:#f9e2af
+    style Q fill:#313145,color:#cba6f7,stroke:#cba6f7
+    style R fill:#313145,color:#89dceb,stroke:#89dceb
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TAB 2 -->
+<div id="tab-download" class="diagram-section">
+  <div class="mermaid-wrap">
+    <div class="mermaid">
+flowchart TD
+    A([ProspektWorker startet]) --> B[Cleanup Sentinels in DB]
+    B --> C{force_reload?}
+    C -- Ja --> D[Alle ISINs für Phase 1]
+    C -- Nein --> E[ISINs ohne subfonds_id]
+
+    D --> F
+    E --> F
+
+    subgraph Phase1["Phase 1 — Metadaten (parallel, 4 Threads)"]
+        F[ThreadPoolExecutor\nN ISINs] --> G[fundinfo API\nfetch_fund_metadata]
+        G --> H{Daten\nerhalten?}
+        H -- Ja --> I[DB update:\nsubfonds_id, name,\nURL, TER, Anlegertyp …]
+        I --> J[Geschwister-ISINs\nentdecken]
+        J --> K[Neue ISINs in DB\nanlegen]
+        H -- Nein --> L[mark_meta_not_found\nmark_prospekt_nicht_gefunden]
+    end
+
+    K --> M{phase1_only?}
+    L --> M
+    M -- Ja --> Z([Fertig — nur Metadaten])
+    M -- Nein --> N
+
+    subgraph Phase2["Phase 2 — Download (parallel, 4 Threads)"]
+        N[ISINs nach subfonds_id\ngruppieren] --> O[Pro Gruppe 1 PDF]
+        O --> P{Alle ISINs\nhaben PDF?}
+        P -- Ja --> Q[Gruppe überspringen]
+        P -- Nein --> R{Pfad einer ISIN\nexistiert?}
+        R -- Ja --> S[Andere ISINs\nverknüpfen]
+        R -- Nein --> T{URL aus\nDB bekannt?}
+        T -- Nein --> U[fundinfo:\ndiscover_prospectus_url]
+        T -- Ja --> V
+        U --> V{URL\ngefunden?}
+        V -- Nein --> W[mark_prospekt_nicht_gefunden]
+        V -- Ja --> X{URL gerade\nin Download?}
+        X -- Ja --> Y[Überspringen\nanderer Thread lädt]
+        X -- Nein --> Z2[PDF herunterladen]
+        Z2 --> AA{Download\nerfolgreich?}
+        AA -- Ja --> BB[update_prospekt\nfür alle ISINs der Gruppe]
+        AA -- Nein --> CC[mark_prospekt_nicht_gefunden]
+    end
+
+    BB --> ZZ([Fertig: Neu / Übersprungen / Fehler])
+    CC --> ZZ
+    Q --> ZZ
+    S --> ZZ
+    W --> ZZ
+    Y --> ZZ
+
+    style Phase1 fill:#1e1e2e,stroke:#89b4fa,color:#cdd6f4
+    style Phase2 fill:#1e1e2e,stroke:#a6e3a1,color:#cdd6f4
+    style Z fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    style ZZ fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    style W fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style CC fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style L fill:#313145,color:#f38ba8,stroke:#f38ba8
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TAB 3 -->
+<div id="tab-llm" class="diagram-section">
+  <div class="mermaid-wrap">
+    <div class="mermaid">
+flowchart TD
+    A([LLMAnalysisWorker startet]) --> B[Gruppen laden\n1 PDF pro Subfonds]
+
+    subgraph Worker["N Worker-Threads (parallel)"]
+        B --> C[Pro Gruppe:\nPDF-Pfad suchen]
+        C --> D{PDF\nvorhanden?}
+        D -- Nein --> E[Überspringen]
+        D -- Ja --> F{PDF > 30 MB?}
+        F -- Ja --> G[Überspringen\nzu groß]
+        F -- Nein --> H{> 150 Seiten &\nkein .trimmed.txt?}
+        H -- Ja --> I[Hinweis: PDF-Kürzer\nverwenden]
+        H -- Nein --> J[Text extrahieren\nextract_relevant_text]
+
+        J --> K{Tabellen-JSON\nvorhanden?}
+        K -- Ja --> L[Tabellen\nvoranhängen]
+        K -- Nein --> M
+        L --> M[Text an LLM senden\nmax 80.000 Zeichen]
+
+        M --> N{Provider}
+        N -- anthropic --> O[Claude API\nAnthropic SDK]
+        N -- gemini --> P[Gemini API\ngoogle.generativeai]
+
+        O --> Q{Rate Limit?}
+        P --> Q
+        Q -- Ja --> R{Retry\n≤ 6 Versuche}
+        R -- Nein --> S[Fehler: aufgeben]
+        R -- Ja --> T[2h warten\ndann Retry]
+        T --> O
+
+        Q -- Nein --> U[JSON-Antwort\nparsen]
+        U --> V{Parse\nerfolg?}
+        V -- Nein --> W[Fehler loggen]
+        V -- Ja --> X[Ergebnisse\nmatchen]
+
+        X --> Y[nach ISIN / Anteilsklassenname\noder erste Klasse bei Einzel-ISIN]
+        Y --> Z[DB: update_llm_analysis\nSegmentierung, Fondstyp …]
+    end
+
+    Z --> AA([Fertig: Analysiert / Übersprungen / Fehler])
+
+    style Worker fill:#1e1e2e,stroke:#cba6f7,color:#cdd6f4
+    style AA fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    style E fill:#313145,color:#f9e2af,stroke:#f9e2af
+    style G fill:#313145,color:#f9e2af,stroke:#f9e2af
+    style I fill:#313145,color:#f9e2af,stroke:#f9e2af
+    style S fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style W fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style O fill:#313145,color:#cba6f7,stroke:#cba6f7
+    style P fill:#313145,color:#89dceb,stroke:#89dceb
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TAB 4 -->
+<div id="tab-pdf" class="diagram-section">
+  <div class="mermaid-wrap">
+    <div class="mermaid">
+flowchart TD
+    A([extract_relevant_text]) --> B{.trimmed.txt\nexistiert?}
+    B -- Ja --> C[Trimmed-Text lesen\nhohe Priorität]
+    B -- Nein --> D[extract_text_from_pdf]
+
+    subgraph Extraktion["PDF-Extraktion (pdfplumber)"]
+        D --> E[PDF öffnen]
+        E --> F{> 150 Seiten?}
+        F -- Ja --> G[Warnung: nur\nerste 150 Seiten]
+        F -- Nein --> H
+        G --> H[Seite für Seite\nextract_text]
+        H --> I{Seite hat Text?}
+        I -- Ja --> J[Text sammeln]
+        I -- Nein --> K[Bild-Seite merken]
+        K --> L{pytesseract +\npdf2image vorhanden?}
+        L -- Ja --> M[OCR auf Bild-Seiten]
+        L -- Nein --> N[Warnung: kein OCR]
+        M --> J
+    end
+
+    J --> O[Texte zusammenführen]
+    C --> P
+    O --> Q{Text\ngefunden?}
+    Q -- Nein --> R[None zurückgeben]
+    Q -- Ja --> S[extract_relevant_sections]
+
+    subgraph Filter["Keyword-Filter"]
+        S --> T[Schlüsselwörter suchen:\nAnleger, Investor, UCITS,\nMiFID, Mindestanlage …]
+        T --> U[5 Zeilen Kontext\nrund um Treffer]
+        U --> V{Ergebnis\n> 500 Zeichen?}
+        V -- Nein --> W[Erste 10.000\nZeichen verwenden]
+        V -- Ja --> X[Auf 80.000 Zeichen\nkürzen]
+    end
+
+    W --> P[Relevanzer Text]
+    X --> P
+
+    subgraph Tabellen["Tabellen-Extraktion (parallel)"]
+        P --> T2[extract_tables_from_pdf]
+        T2 --> T3[Pro Seite: extract_tables]
+        T3 --> T4{Relevante Header?\nISIN, TER, Anleger …}
+        T4 -- Ja --> T5[Tabelle speichern\n.tables.json]
+        T4 -- Nein --> T6[Ignorieren]
+    end
+
+    T5 --> T7([Text + Tabellen bereit])
+    T6 --> T7
+    R --> RR([Fehler: kein Text])
+
+    style Extraktion fill:#1e1e2e,stroke:#89b4fa,color:#cdd6f4
+    style Filter fill:#1e1e2e,stroke:#f9e2af,color:#cdd6f4
+    style Tabellen fill:#1e1e2e,stroke:#a6e3a1,color:#cdd6f4
+    style R fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style RR fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style T7 fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    style N fill:#313145,color:#f9e2af,stroke:#f9e2af
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TAB 5 -->
+<div id="tab-rules" class="diagram-section">
+  <div class="mermaid-wrap">
+    <div class="mermaid">
+flowchart TD
+    A([LLM gibt JSON zurück]) --> B[Felder extrahieren]
+
+    subgraph Felder["Erwartete JSON-Felder"]
+        B --> F1[segmentierung]
+        B --> F2[fondstyp]
+        B --> F3[anlegertyp]
+        B --> F4[kundentyp]
+        B --> F5[begruendung]
+        B --> F6[konfidenz]
+        B --> F7[anteilsklassen - Liste]
+    end
+
+    F1 --> N1{Normalisierung\nsegmentierung}
+    N1 --> N1A{"institutional"\noder "institutionell"\nim Text?}
+    N1A -- Ja --> R1[→ institutional]
+    N1A -- Nein --> N1B{"retail"\noder "privat"?}
+    N1B -- Ja --> R2[→ retail]
+    N1B -- Nein --> N1C{"qualified"\noder "qualifiziert"?}
+    N1C -- Ja --> R3[→ qualified]
+    N1C -- Nein --> N1D{"mixed"\noder "gemischt"?}
+    N1D -- Ja --> R4[→ mixed]
+    N1D -- Nein --> R5[→ unklar]
+
+    F7 --> M[Matching: ISIN → Klassen-Eintrag]
+    M --> MA{ISIN direkt\ngefunden?}
+    MA -- Ja --> MB[Klassen-Eintrag\nverwenden]
+    MA -- Nein --> MC{Anteilsklassenname\nmatch?}
+    MC -- Ja --> MB
+    MC -- Nein --> MD{Nur 1\nKlasse im JSON?}
+    MD -- Ja --> MB
+    MD -- Nein --> ME[Kein Match\nFelder bleiben leer]
+
+    MB --> DB[DB-Update\nupdate_llm_analysis]
+    R1 --> DB
+    R2 --> DB
+    R3 --> DB
+    R4 --> DB
+    R5 --> DB
+    ME --> DB
+
+    subgraph Konfidenz["Konfidenz-Anzeige-Regeln"]
+        DB --> K1{konfidenz == niedrig?}
+        K1 -- Ja --> K2[Gelb hervorheben\nin UI]
+        K1 -- Nein --> K3[Normal anzeigen]
+    end
+
+    subgraph SegFarbe["Segmentierungs-Farben in UI"]
+        K2 --> C1[institutional → Blau]
+        K3 --> C1
+        C1 --> C2[retail → Grün]
+        C2 --> C3[sonstige → Gelb]
+    end
+
+    C3 --> END([Anzeige in Ergebnis-Fenster])
+
+    style Felder fill:#1e1e2e,stroke:#89b4fa,color:#cdd6f4
+    style Konfidenz fill:#1e1e2e,stroke:#f9e2af,color:#cdd6f4
+    style SegFarbe fill:#1e1e2e,stroke:#a6e3a1,color:#cdd6f4
+    style R1 fill:#313145,color:#89b4fa,stroke:#89b4fa
+    style R2 fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    style R3 fill:#313145,color:#cba6f7,stroke:#cba6f7
+    style R4 fill:#313145,color:#89dceb,stroke:#89dceb
+    style R5 fill:#313145,color:#f38ba8,stroke:#f38ba8
+    style K2 fill:#313145,color:#f9e2af,stroke:#f9e2af
+    style END fill:#313145,color:#a6e3a1,stroke:#a6e3a1
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#89b4fa"></div> Download / Daten</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#cba6f7"></div> LLM / Claude</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#89dceb"></div> Gemini</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#a6e3a1"></div> Erfolg / Retail</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f38ba8"></div> Fehler</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f9e2af"></div> Warnung / Niedrige Konfidenz</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#b4befe"></div> Datenbank</div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    themeVariables: {
+      background: "#2a2a3e",
+      primaryColor: "#313145",
+      primaryTextColor: "#cdd6f4",
+      primaryBorderColor: "#89b4fa",
+      lineColor: "#7f849c",
+      secondaryColor: "#1e1e2e",
+      tertiaryColor: "#2a2a3e",
+      clusterBorder: "#45475a",
+      clusterBkg: "#1e1e2e",
+      nodeBorder: "#89b4fa",
+      mainBkg: "#313145",
+      edgeLabelBackground: "#2a2a3e",
+    },
+    flowchart: { curve: "basis", useMaxWidth: false }
+  });
+
+  function showTab(name) {
+    document.querySelectorAll(".diagram-section").forEach(s => s.classList.remove("active"));
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.getElementById("tab-" + name).classList.add("active");
+    event.target.classList.add("active");
+  }
+</script>
+</body>
+</html>
