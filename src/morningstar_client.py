@@ -159,8 +159,12 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _try_dynamic_registration(registration_endpoint: str) -> str:
-    """Dynamische Client-Registrierung (RFC 7591). Gibt client_id zurück oder ''."""
+def _try_dynamic_registration(registration_endpoint: str, redirect_uri: str) -> str:
+    """
+    Dynamische Client-Registrierung (RFC 7591).
+    Registriert mit der exakten redirect_uri die im Auth-Flow verwendet wird.
+    Gibt client_id zurück oder ''.
+    """
     if not registration_endpoint:
         return ""
     try:
@@ -168,18 +172,23 @@ def _try_dynamic_registration(registration_endpoint: str) -> str:
             registration_endpoint,
             json={
                 "client_name":                "FundProspektPilot",
-                "redirect_uris":              ["http://localhost"],
+                "redirect_uris":              [redirect_uri],
                 "grant_types":                ["authorization_code"],
                 "response_types":             ["code"],
                 "token_endpoint_auth_method": "none",
+                "application_type":           "native",
             },
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=15,
         )
         if resp.ok:
-            return resp.json().get("client_id", "")
-    except Exception:
-        pass
+            cid = resp.json().get("client_id", "")
+            if cid:
+                logger.info(f"Dynamic Registration erfolgreich: client_id={cid[:8]}...")
+            return cid
+        logger.warning(f"Dynamic Registration fehlgeschlagen: HTTP {resp.status_code} — {resp.text[:200]}")
+    except Exception as exc:
+        logger.warning(f"Dynamic Registration Fehler: {exc}")
     return ""
 
 
@@ -187,6 +196,7 @@ def login_via_browser(
     auth_url: str,
     token_url: str,
     client_id: str = "",
+    registration_endpoint: str = "",
     timeout: int = 300,
 ) -> dict:
     """
@@ -207,6 +217,12 @@ def login_via_browser(
     redirect_uri = f"http://localhost:{port}/callback"
     state        = secrets.token_urlsafe(16)
     verifier, challenge = _pkce_pair()
+
+    # Dynamic Registration mit exakter redirect_uri (falls noch keine client_id)
+    if not client_id and registration_endpoint:
+        client_id = _try_dynamic_registration(registration_endpoint, redirect_uri)
+        if client_id:
+            logger.info(f"Verwende dynamisch registrierte client_id: {client_id[:8]}...")
 
     result: dict = {}
     done = threading.Event()
@@ -292,6 +308,8 @@ def login_via_browser(
         raise RuntimeError(f"Kein access_token in der Antwort: {list(tokens.keys())}")
 
     logger.info("Morningstar: Browser-Login erfolgreich, Token erhalten.")
+    if client_id:
+        tokens["_client_id"] = client_id
     return tokens
 
 

@@ -480,46 +480,37 @@ class AdminPanel(tk.Toplevel):
 
         def run():
             try:
-                from morningstar_client import (
-                    discover_auth_endpoints, _try_dynamic_registration, login_via_browser
-                )
+                from morningstar_client import discover_auth_endpoints, login_via_browser
                 endpoints = discover_auth_endpoints()
 
                 if not endpoints.get("authorization_endpoint"):
                     raise RuntimeError("Kein authorization_endpoint in Auth-Server-Metadaten.")
 
-                # Client-ID: manuell eingegeben > gecacht > Dynamic Registration
-                # E-Mail-Adressen sind keine gültigen OAuth2 Client-IDs → ignorieren
-                def _valid_client_id(v: str) -> str:
-                    return v if v and "@" not in v else ""
-
-                client_id = (_valid_client_id(self.var_ms_client_id.get().strip())
-                             or _valid_client_id(os.getenv("MORNINGSTAR_CLIENT_ID", "")))
-                if not client_id and endpoints.get("registration_endpoint"):
-                    client_id = _try_dynamic_registration(endpoints["registration_endpoint"])
-                    if client_id:
-                        self.after(0, lambda cid=client_id: self.var_ms_client_id.set(cid))
-                if client_id:
-                    set_key(".env", "MORNINGSTAR_CLIENT_ID", client_id)
-                    os.environ["MORNINGSTAR_CLIENT_ID"] = client_id
+                # Manuell eingegebene Client-ID hat Vorrang (E-Mails ignorieren)
+                manual_cid = self.var_ms_client_id.get().strip()
+                client_id  = manual_cid if manual_cid and "@" not in manual_cid else ""
 
                 self.after(0, lambda: self.ms_status.config(
                     text="Browser geöffnet — bitte bei Morningstar anmelden...",
                     fg=ACCENT_YELLOW,
                 ))
 
+                # Registrierung (falls nötig) passiert innerhalb login_via_browser
+                # mit der exakten Redirect-URI — so stimmen Port und URI überein
                 tokens = login_via_browser(
                     auth_url=endpoints["authorization_endpoint"],
                     token_url=endpoints["token_endpoint"],
                     client_id=client_id,
+                    registration_endpoint=endpoints.get("registration_endpoint", ""),
                 )
 
                 # Token + Ablaufzeit speichern
                 from datetime import datetime, timedelta
-                access_token = tokens["access_token"]
-                expires_in   = int(tokens.get("expires_in", 3600))
-                expires_at   = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
-                refresh_tok  = tokens.get("refresh_token", "")
+                access_token  = tokens["access_token"]
+                expires_in    = int(tokens.get("expires_in", 3600))
+                expires_at    = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
+                refresh_tok   = tokens.get("refresh_token", "")
+                used_cid      = tokens.get("_client_id", client_id)
 
                 for key, val in [
                     ("MORNINGSTAR_ACCESS_TOKEN",  access_token),
@@ -531,6 +522,10 @@ class AdminPanel(tk.Toplevel):
                 if refresh_tok:
                     set_key(".env", "MORNINGSTAR_REFRESH_TOKEN", refresh_tok)
                     os.environ["MORNINGSTAR_REFRESH_TOKEN"] = refresh_tok
+                if used_cid:
+                    set_key(".env", "MORNINGSTAR_CLIENT_ID", used_cid)
+                    os.environ["MORNINGSTAR_CLIENT_ID"] = used_cid
+                    self.after(0, lambda cid=used_cid: self.var_ms_client_id.set(cid))
 
                 msg = f"✔ Angemeldet — Token gültig ~{expires_in // 60} Min."
                 self.after(0, lambda: self._on_ms_login_done(True, msg))
