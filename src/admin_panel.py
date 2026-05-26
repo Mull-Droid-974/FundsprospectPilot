@@ -241,14 +241,34 @@ class AdminPanel(tk.Toplevel):
         )
         self.validate_ms_btn.pack(side="left")
 
+        self._ms_discover_btn = tk.Button(
+            btn_row, text="🔍 Discovery testen",
+            command=self._discover_ms_endpoints,
+            bg=BTN_BG, fg=FG_MUTED, relief="flat",
+            font=("Segoe UI", 8), padx=8, pady=4, cursor="hand2",
+        )
+        self._ms_discover_btn.pack(side="left", padx=(6, 0))
+
         self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
         self.ms_status.pack(side="left", padx=(10, 0))
+
+        cid_frame = self._section(parent, "OAuth2 Client-ID (optional)")
+        cid_frame.columnconfigure(1, weight=1)
+        self.var_ms_client_id = tk.StringVar()
+        self._field(cid_frame, "Client-ID:", self.var_ms_client_id, 0)
+        tk.Label(
+            cid_frame,
+            text="Leer lassen für automatische Registrierung.\n"
+                 "Morningstar-Entwicklerportal: developer.morningstar.com",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
+            justify="left", anchor="w",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
         info_frame = self._section(parent, "MCP-Endpoint")
         tk.Label(
             info_frame,
             text="Endpoint: mcp.morningstar.com/mcp (fest)\n"
-                 "Auth-Endpoints und Client-ID werden automatisch via Well-Known-Discovery ermittelt.",
+                 "Auth-Server: login-prod.morningstar.com (Auth0)",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
             justify="left", anchor="w", wraplength=460,
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(6, 10))
@@ -367,6 +387,7 @@ class AdminPanel(tk.Toplevel):
         self.var_openrouter_key.set(os.getenv("OPENROUTER_API_KEY", ""))
         self.var_or_batch.set(os.getenv("OPENROUTER_BATCH_MODEL", DEFAULT_BATCH_MODELS["openrouter"]))
         self.var_or_single.set(os.getenv("OPENROUTER_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["openrouter"]))
+        self.var_ms_client_id.set(os.getenv("MORNINGSTAR_CLIENT_ID", ""))
         self._refresh_ms_login_status()
 
     def _validate_key(self):
@@ -447,6 +468,7 @@ class AdminPanel(tk.Toplevel):
     def _login_ms_browser(self):
         """Startet den OAuth2 Authorization Code + PKCE Browser-Login."""
         self.validate_ms_btn.config(state="disabled")
+        self._ms_discover_btn.config(state="disabled")
         self.ms_status.config(text="Ermittle Auth-Endpoints...", fg=FG_MUTED)
 
         def run():
@@ -459,13 +481,16 @@ class AdminPanel(tk.Toplevel):
                 if not endpoints.get("authorization_endpoint"):
                     raise RuntimeError("Kein authorization_endpoint in Auth-Server-Metadaten.")
 
-                # Client-ID: gecacht oder per Dynamic Registration
-                client_id = os.getenv("MORNINGSTAR_CLIENT_ID", "")
+                # Client-ID: manuell eingegeben > gecacht > Dynamic Registration
+                client_id = (self.var_ms_client_id.get().strip()
+                             or os.getenv("MORNINGSTAR_CLIENT_ID", ""))
                 if not client_id and endpoints.get("registration_endpoint"):
                     client_id = _try_dynamic_registration(endpoints["registration_endpoint"])
                     if client_id:
-                        set_key(".env", "MORNINGSTAR_CLIENT_ID", client_id)
-                        os.environ["MORNINGSTAR_CLIENT_ID"] = client_id
+                        self.after(0, lambda cid=client_id: self.var_ms_client_id.set(cid))
+                if client_id:
+                    set_key(".env", "MORNINGSTAR_CLIENT_ID", client_id)
+                    os.environ["MORNINGSTAR_CLIENT_ID"] = client_id
 
                 self.after(0, lambda: self.ms_status.config(
                     text="Browser geöffnet — bitte bei Morningstar anmelden...",
@@ -500,13 +525,63 @@ class AdminPanel(tk.Toplevel):
                 self.after(0, lambda: self._on_ms_login_done(True, msg))
 
             except Exception as exc:
-                self.after(0, lambda e=str(exc): self._on_ms_login_done(False, e))
+                err = str(exc)
+                self.after(0, lambda e=err: self._on_ms_login_done(False, e))
+                self.after(0, lambda e=err: messagebox.showerror(
+                    "Morningstar Login-Fehler", e, parent=self
+                ))
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _discover_ms_endpoints(self):
+        """Testet die Well-Known-Discovery und zeigt das Ergebnis an."""
+        self._ms_discover_btn.config(state="disabled")
+        self.ms_status.config(text="Discovery läuft...", fg=FG_MUTED)
+
+        def run():
+            import requests as _req
+            from urllib.parse import urljoin
+            lines = []
+            mcp_base = "https://mcp.morningstar.com"
+
+            for path in ["/.well-known/oauth-protected-resource/mcp",
+                         "/.well-known/oauth-protected-resource"]:
+                url = urljoin(mcp_base, path)
+                try:
+                    r = _req.get(url, timeout=10)
+                    lines.append(f"GET {url}")
+                    lines.append(f"  → HTTP {r.status_code}")
+                    if r.ok:
+                        lines.append(f"  → {r.text[:500]}")
+                    else:
+                        lines.append(f"  → {r.text[:200]}")
+                except Exception as e:
+                    lines.append(f"GET {url}")
+                    lines.append(f"  → Fehler: {e}")
+
+            try:
+                from morningstar_client import discover_auth_endpoints
+                eps = discover_auth_endpoints()
+                lines.append("\n--- Entdeckte Endpoints ---")
+                for k, v in eps.items():
+                    lines.append(f"  {k}: {v}")
+            except Exception as e:
+                lines.append(f"\n--- Discovery-Fehler ---\n  {e}")
+
+            result = "\n".join(lines)
+            self.after(0, lambda: self._on_ms_discover_done(result))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_ms_discover_done(self, result: str):
+        self._ms_discover_btn.config(state="normal")
+        self.ms_status.config(text="", fg=FG_MUTED)
+        messagebox.showinfo("Discovery-Ergebnis", result, parent=self)
+
     def _on_ms_login_done(self, ok: bool, msg: str):
         self.validate_ms_btn.config(state="normal")
-        self.ms_status.config(text=msg[:90], fg=ACCENT_GREEN if ok else ACCENT_RED)
+        self._ms_discover_btn.config(state="normal")
+        self.ms_status.config(text=msg[:120], fg=ACCENT_GREEN if ok else ACCENT_RED)
         if ok:
             self._refresh_ms_login_status()
 

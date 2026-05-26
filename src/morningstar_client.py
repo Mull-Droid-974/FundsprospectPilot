@@ -65,22 +65,27 @@ _BATCH_SIZE = 20
 
 # ─── OAuth2 Discovery & Browser-Login ───────────────────────────────────────
 
+_MS_AUTH_BASE = "https://login-prod.morningstar.com"   # bekannter Auth0-Server
+
+
 def discover_auth_endpoints(mcp_base: str = MCP_BASE) -> dict:
     """
-    Ermittelt alle OAuth2-Endpoints via MCP Well-Known-Discovery (RFC 9728 → RFC 8414).
+    Ermittelt alle OAuth2-Endpoints für den Morningstar MCP-Server.
+
+    Strategie (erste die funktioniert):
+      1. RFC 9728 Well-Known (oauth-protected-resource)
+      2. WWW-Authenticate-Header des MCP-Endpoints
+      3. Bekannter Fallback: login-prod.morningstar.com (Auth0)
+      4. OpenID Configuration des ermittelten Issuers
 
     Returns:
-        {
-          "issuer": str,
-          "authorization_endpoint": str,
-          "token_endpoint": str,
-          "registration_endpoint": str,   # leer wenn nicht vorhanden
-        }
-    Raises:
-        RuntimeError: wenn Discovery fehlschlägt
+        {"issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint"}
     """
-    # Schritt 1: Protected Resource Metadata → Issuer-URL
+    import re
+
     issuer = None
+
+    # Schritt 1: Protected Resource Metadata (RFC 9728)
     for path in ["/.well-known/oauth-protected-resource/mcp",
                  "/.well-known/oauth-protected-resource"]:
         try:
@@ -91,19 +96,31 @@ def discover_auth_endpoints(mcp_base: str = MCP_BASE) -> dict:
                 if servers:
                     entry = servers[0]
                     issuer = (entry.get("issuer") or entry) if isinstance(entry, dict) else entry
+                    logger.info(f"Morningstar Issuer via RFC 9728: {issuer}")
                     break
         except Exception:
             continue
 
+    # Schritt 2: WWW-Authenticate-Header des MCP-Endpoints auslesen
     if not issuer:
-        raise RuntimeError(
-            "MCP-Discovery fehlgeschlagen: /.well-known/oauth-protected-resource "
-            "lieferte keinen authorization_servers-Eintrag."
-        )
+        try:
+            resp = requests.get(MCP_ENDPOINT, timeout=10)
+            auth_hdr = resp.headers.get("WWW-Authenticate", "")
+            m = re.search(r'as_uri="([^"]+)"', auth_hdr)
+            if m:
+                issuer = m.group(1)
+                logger.info(f"Morningstar Issuer via WWW-Authenticate: {issuer}")
+        except Exception:
+            pass
 
-    # Schritt 2: Authorization Server Metadata → alle Endpoints
-    for path in ["/.well-known/oauth-authorization-server",
-                 "/.well-known/openid-configuration"]:
+    # Schritt 3: Bekannter Morningstar-Auth0-Server als Fallback
+    if not issuer:
+        issuer = _MS_AUTH_BASE
+        logger.warning(f"Discovery fehlgeschlagen — verwende bekannten Fallback: {issuer}")
+
+    # Schritt 4: OpenID Configuration / OAuth AS Metadata
+    for path in ["/.well-known/openid-configuration",
+                 "/.well-known/oauth-authorization-server"]:
         try:
             resp = requests.get(urljoin(issuer, path), timeout=10)
             if resp.ok:
@@ -119,9 +136,14 @@ def discover_auth_endpoints(mcp_base: str = MCP_BASE) -> dict:
         except Exception:
             continue
 
-    raise RuntimeError(
-        f"Auth-Server-Metadaten nicht gefunden (Issuer: {issuer})"
-    )
+    # Schritt 5: Auth0-Standard-Endpoints direkt konstruieren (Fallback)
+    logger.warning(f"OpenID Configuration nicht erreichbar — konstruiere Auth0-Endpoints für {issuer}")
+    return {
+        "issuer":                  issuer,
+        "authorization_endpoint":  f"{issuer.rstrip('/')}/authorize",
+        "token_endpoint":          f"{issuer.rstrip('/')}/oauth/token",
+        "registration_endpoint":   f"{issuer.rstrip('/')}/oidc/register",
+    }
 
 
 def _find_free_port() -> int:
