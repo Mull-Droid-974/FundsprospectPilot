@@ -302,6 +302,14 @@ class ResultsWindow(tk.Toplevel):
             self._show_detail(row)
 
     def _show_detail(self, row: dict):
+        isin = row.get("isin", "")
+        try:
+            import morningstar_store
+            ms = morningstar_store.get_morningstar(isin) or {}
+            row = {**row, **ms}
+        except Exception:
+            pass
+
         win = tk.Toplevel(self)
         win.transient(self)
         win.grab_set()
@@ -351,11 +359,19 @@ class ResultsWindow(tk.Toplevel):
             ("LLM-Segmentierung", ["llm_segmentierung", "llm_segmentierung_begruendung"]),
             ("Fundinfo API", ["fundinfo_ter", "fundinfo_investor_type", "umbrella_id",
                               "ongoing_charges_datum", "qualif_anleger_ch", "institutional_ch"]),
+            ("Morningstar", ["ms_category", "ms_legal_type", "ms_investor_type",
+                             "ms_mifid_category", "ms_rating", "ms_share_class_status",
+                             "ms_inception_date", "ms_termination_date"]),
             ("Prospekt", ["prospekt_url", "prospekt_pfad"]),
             ("Rohdaten LLM", ["fondstyp_roh", "anlegertyp_roh", "kundentyp_roh"]),
         ]
 
         _LABELS = {k: h for k, h, _ in _COLS}
+        try:
+            from morningstar_client import AVAILABLE_DATAPOINTS as _MS_DP
+            _LABELS.update({k: v[1] for k, v in _MS_DP.items()})
+        except Exception:
+            pass
 
         for group_title, keys in _GROUPS:
             # Gruppenheader

@@ -219,6 +219,47 @@ class AdminPanel(tk.Toplevel):
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8)
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
+    def _build_tab_morningstar(self, parent):
+        api_frame = self._section(parent, "OAuth2 Credentials (Morningstar Direct)")
+        api_frame.columnconfigure(1, weight=1)
+        self.var_ms_client_id = tk.StringVar()
+        self.var_ms_client_secret = tk.StringVar()
+        self._field(api_frame, "Client ID:", self.var_ms_client_id, 0)
+        ms_secret_entry = self._field(api_frame, "Client Secret:", self.var_ms_client_secret, 1, show="*")
+
+        btn_row = tk.Frame(api_frame, bg=BG_PANEL)
+        btn_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 8))
+        tk.Button(
+            btn_row, text="🔑  Anzeigen / Verbergen",
+            command=lambda: ms_secret_entry.config(
+                show="" if ms_secret_entry.cget("show") else "*"
+            ),
+            bg=BTN_BG, fg=FG_MUTED, relief="flat",
+            font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
+        ).pack(side="left")
+        self.validate_ms_btn = tk.Button(
+            btn_row, text="✔  Verbindung testen",
+            command=self._validate_ms_connection,
+            bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
+            font=("Segoe UI", 8), padx=8, pady=3, cursor="hand2"
+        )
+        self.validate_ms_btn.pack(side="left", padx=(6, 0))
+        self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
+        self.ms_status.pack(side="left", padx=(8, 0))
+
+        url_frame = self._section(parent, "Endpoint-URLs")
+        url_frame.columnconfigure(1, weight=1)
+        self.var_ms_token_url = tk.StringVar()
+        self.var_ms_data_url = tk.StringVar()
+        self._field(url_frame, "Token-URL:", self.var_ms_token_url, 0)
+        self._field(url_frame, "Daten-URL:", self.var_ms_data_url, 1)
+        tk.Label(
+            url_frame,
+            text="Endpoint-URLs aus der Morningstar Direct Web Services Dokumentation entnehmen.",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8),
+            wraplength=440, justify="left"
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
     def _build_tab_system(self, parent):
         proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
         self.var_batch_size = tk.StringVar()
@@ -276,6 +317,7 @@ class AdminPanel(tk.Toplevel):
             ("🔑  Anthropic",   self._build_tab_anthropic),
             ("🤖  Gemini",      self._build_tab_gemini),
             ("🌐  OpenRouter",  self._build_tab_openrouter),
+            ("🌟  Morningstar", self._build_tab_morningstar),
             ("⚙  System",      self._build_tab_system),
         ]
         for label, builder in tabs:
@@ -332,6 +374,10 @@ class AdminPanel(tk.Toplevel):
         self.var_openrouter_key.set(os.getenv("OPENROUTER_API_KEY", ""))
         self.var_or_batch.set(os.getenv("OPENROUTER_BATCH_MODEL", DEFAULT_BATCH_MODELS["openrouter"]))
         self.var_or_single.set(os.getenv("OPENROUTER_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["openrouter"]))
+        self.var_ms_client_id.set(os.getenv("MORNINGSTAR_CLIENT_ID", ""))
+        self.var_ms_client_secret.set(os.getenv("MORNINGSTAR_CLIENT_SECRET", ""))
+        self.var_ms_token_url.set(os.getenv("MORNINGSTAR_TOKEN_URL", ""))
+        self.var_ms_data_url.set(os.getenv("MORNINGSTAR_DATA_URL", ""))
 
     def _validate_key(self):
         key = self.var_key.get().strip()
@@ -408,6 +454,33 @@ class AdminPanel(tk.Toplevel):
             fg=ACCENT_GREEN if ok else ACCENT_RED,
         )
 
+    def _validate_ms_connection(self):
+        client_id = self.var_ms_client_id.get().strip()
+        client_secret = self.var_ms_client_secret.get().strip()
+        token_url = self.var_ms_token_url.get().strip()
+        if not all([client_id, client_secret, token_url]):
+            self.ms_status.config(text="Client ID, Secret und Token-URL erforderlich", fg=ACCENT_YELLOW)
+            return
+        self.ms_status.config(text="Verbindung wird geprüft...", fg=FG_MUTED)
+        self.validate_ms_btn.config(state="disabled")
+
+        def check():
+            try:
+                from morningstar_client import get_token
+                get_token(client_id, client_secret, token_url)
+                ok, msg = True, "✔ Token erhalten"
+            except ValueError as exc:
+                ok, msg = False, f"✘ {exc}"
+            except Exception as exc:
+                ok, msg = False, f"✘ {str(exc)[:60]}"
+            self.after(0, lambda: self._on_ms_validate_done(ok, msg))
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def _on_ms_validate_done(self, ok: bool, msg: str):
+        self.validate_ms_btn.config(state="normal")
+        self.ms_status.config(text=msg, fg=ACCENT_GREEN if ok else ACCENT_RED)
+
     def _delete_all_data(self):
         try:
             import results_store
@@ -468,6 +541,26 @@ class AdminPanel(tk.Toplevel):
 
         set_key(".env", "OPENROUTER_BATCH_MODEL", self.var_or_batch.get())
         set_key(".env", "OPENROUTER_SINGLE_MODEL", self.var_or_single.get())
+
+        ms_client_id = self.var_ms_client_id.get().strip()
+        if ms_client_id:
+            set_key(".env", "MORNINGSTAR_CLIENT_ID", ms_client_id)
+            os.environ["MORNINGSTAR_CLIENT_ID"] = ms_client_id
+
+        ms_client_secret = self.var_ms_client_secret.get().strip()
+        if ms_client_secret:
+            set_key(".env", "MORNINGSTAR_CLIENT_SECRET", ms_client_secret)
+            os.environ["MORNINGSTAR_CLIENT_SECRET"] = ms_client_secret
+
+        ms_token_url = self.var_ms_token_url.get().strip()
+        if ms_token_url:
+            set_key(".env", "MORNINGSTAR_TOKEN_URL", ms_token_url)
+            os.environ["MORNINGSTAR_TOKEN_URL"] = ms_token_url
+
+        ms_data_url = self.var_ms_data_url.get().strip()
+        if ms_data_url:
+            set_key(".env", "MORNINGSTAR_DATA_URL", ms_data_url)
+            os.environ["MORNINGSTAR_DATA_URL"] = ms_data_url
 
         messagebox.showinfo("Gespeichert", "Einstellungen wurden gespeichert.", parent=self)
         self.destroy()

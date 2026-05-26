@@ -45,6 +45,7 @@ class App(tk.Tk):
         self._analysis_win = None
         self._pdf_trim_win = None
         self._comparison_win = None
+        self._morningstar_win = None
 
         # Live-Status
         self._current_isin_var = tk.StringVar(value="—")
@@ -104,6 +105,12 @@ class App(tk.Tk):
         self._section_label(sb, "AUSWERTUNG")
         self._nav_btn(sb, "📊", "5. Ergebnisse", self._open_results,           ACCENT_GREEN)
         self._nav_btn(sb, "⚖",  "6. Vergleich", self._open_comparison_window,  ACCENT_YELLOW)
+
+        ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(8, 6))
+
+        # ── Tools ────────────────────────────────────────────────────
+        self._section_label(sb, "TOOLS")
+        self._nav_btn(sb, "🌟", "Morningstar",   self._open_morningstar, ACCENT_YELLOW)
 
         # Admin (unten)
         tk.Frame(sb, bg=BG_PANEL).pack(fill="both", expand=True)
@@ -382,6 +389,14 @@ class App(tk.Tk):
             self._comparison_win.focus_force()
         else:
             self._comparison_win = ComparisonWindow(self)
+
+    def _open_morningstar(self):
+        from morningstar_window import MorningstarWindow
+        if self._morningstar_win and self._morningstar_win.winfo_exists():
+            self._morningstar_win.lift()
+            self._morningstar_win.focus_force()
+        else:
+            self._morningstar_win = MorningstarWindow(self)
 
     def _open_admin(self):
         from admin_panel import AdminPanel
