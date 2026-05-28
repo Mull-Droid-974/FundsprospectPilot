@@ -343,6 +343,77 @@ def refresh_access_token(refresh_token_val: str, token_url: str, client_id: str 
     return resp.json()
 
 
+def login_with_password(
+    username: str,
+    password: str,
+    token_url: str,
+    client_id: str = "",
+) -> dict:
+    """
+    OAuth2 Resource Owner Password Credentials Grant (RFC 6749 §4.3).
+
+    Meldet sich direkt mit E-Mail + Passwort an — kein Browser nötig.
+    Returns: {"access_token": ..., "refresh_token": ..., "expires_in": ...}
+    Raises: ValueError bei falschen Credentials, RuntimeError bei Verbindungsfehlern.
+    """
+    if not username or not password:
+        raise ValueError("E-Mail und Passwort dürfen nicht leer sein.")
+    if not token_url:
+        raise RuntimeError("Kein token_url angegeben.")
+
+    data: dict = {
+        "grant_type": "password",
+        "username":   username,
+        "password":   password,
+        "scope":      "openid profile",
+    }
+    if client_id:
+        data["client_id"] = client_id
+
+    try:
+        resp = requests.post(
+            token_url, data=data,
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Verbindungsfehler beim Login: {exc}")
+
+    if resp.status_code in (400, 401):
+        try:
+            body = resp.json()
+            err  = body.get("error_description") or body.get("error") or resp.text[:200]
+        except Exception:
+            err = resp.text[:200]
+        raise ValueError(f"Login fehlgeschlagen: {err}")
+
+    if resp.status_code == 400:
+        try:
+            body = resp.json()
+            if body.get("error") == "unsupported_grant_type":
+                raise ValueError(
+                    "Morningstar unterstützt ROPC nicht. "
+                    "Bitte den Browser-Login verwenden."
+                )
+        except ValueError:
+            raise
+        except Exception:
+            pass
+
+    if not resp.ok:
+        raise RuntimeError(f"Token-Endpoint Fehler {resp.status_code}: {resp.text[:200]}")
+
+    tokens = resp.json()
+    if not tokens.get("access_token"):
+        raise RuntimeError(
+            f"Kein access_token in der Antwort: {list(tokens.keys())}\n"
+            f"Möglicherweise unterstützt der Server kein Password-Grant."
+        )
+
+    logger.info("Morningstar: Password-Login erfolgreich, Token erhalten.")
+    return tokens
+
+
 # Rückwärtskompatibilität — wird intern nicht mehr verwendet
 discover_token_url = lambda mcp_base=MCP_BASE: discover_auth_endpoints(mcp_base)["token_endpoint"]
 

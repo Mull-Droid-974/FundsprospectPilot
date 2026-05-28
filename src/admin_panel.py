@@ -38,7 +38,7 @@ class AdminPanel(tk.Toplevel):
         super().__init__(parent)
         self.title("Admin-Einstellungen")
         self.configure(bg=BG_MAIN)
-        self.geometry("540x460")
+        self.geometry("540x600")
         self.resizable(False, False)
         self.grab_set()
 
@@ -220,9 +220,10 @@ class AdminPanel(tk.Toplevel):
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
     def _build_tab_morningstar(self, parent):
-        login_frame = self._section(parent, "Morningstar Direct — Browser-Login")
-        login_frame.columnconfigure(0, weight=1)
+        login_frame = self._section(parent, "Morningstar — Anmeldung")
+        login_frame.columnconfigure(1, weight=1)
 
+        # Login-Status
         self._ms_login_status = tk.Label(
             login_frame, text="— Nicht angemeldet",
             bg=BG_PANEL, fg=FG_MUTED,
@@ -230,13 +231,51 @@ class AdminPanel(tk.Toplevel):
         )
         self._ms_login_status.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4))
 
+        # E-Mail + Passwort
+        self.var_ms_email    = tk.StringVar()
+        self.var_ms_password = tk.StringVar()
+        self._field(login_frame, "E-Mail:", self.var_ms_email, 1)
+        pw_entry = self._field(login_frame, "Passwort:", self.var_ms_password, 2, show="*")
+
+        # Passwort-Login-Button-Zeile
+        pw_btn_row = tk.Frame(login_frame, bg=BG_PANEL)
+        pw_btn_row.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 8))
+
+        self._btn_pw_login = tk.Button(
+            pw_btn_row, text="🔑  Mit E-Mail + Passwort anmelden",
+            command=self._login_ms_password,
+            bg="#1a2e1a", fg=ACCENT_GREEN, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=4, cursor="hand2",
+        )
+        self._btn_pw_login.pack(side="left")
+
+        tk.Button(
+            pw_btn_row, text="👁",
+            command=lambda: pw_entry.config(show="" if pw_entry.cget("show") else "*"),
+            bg=BTN_BG, fg=FG_MUTED, relief="flat",
+            font=("Segoe UI", 9), padx=6, pady=4, cursor="hand2",
+        ).pack(side="left", padx=(6, 0))
+
+        self._ms_pw_status = tk.Label(pw_btn_row, text="", bg=BG_PANEL,
+                                      font=("Segoe UI", 8), wraplength=260, justify="left")
+        self._ms_pw_status.pack(side="left", padx=(10, 0))
+
+        # Separator + Alternative Browser-Login
+        ttk.Separator(login_frame, orient="horizontal").grid(
+            row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 4)
+        )
+        tk.Label(
+            login_frame, text="Alternative: Browser-OAuth2",
+            bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8), anchor="w",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=12)
+
         btn_row = tk.Frame(login_frame, bg=BG_PANEL)
-        btn_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+        btn_row.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 10))
 
         self.validate_ms_btn = tk.Button(
             btn_row, text="🌐  Im Browser anmelden",
             command=self._login_ms_browser,
-            bg="#1a2e1a", fg=ACCENT_GREEN, relief="flat",
+            bg=BTN_BG, fg=FG_TEXT, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=4, cursor="hand2",
         )
         self.validate_ms_btn.pack(side="left")
@@ -259,13 +298,13 @@ class AdminPanel(tk.Toplevel):
         self.ms_status = tk.Label(btn_row, text="", bg=BG_PANEL, font=("Segoe UI", 8))
         self.ms_status.pack(side="left", padx=(10, 0))
 
-        cid_frame = self._section(parent, "OAuth2 Client-ID (optional)")
+        cid_frame = self._section(parent, "OAuth2 Client-ID (optional, nur Browser-Login)")
         cid_frame.columnconfigure(1, weight=1)
         self.var_ms_client_id = tk.StringVar()
         self._field(cid_frame, "Client-ID:", self.var_ms_client_id, 0)
         tk.Label(
             cid_frame,
-            text="Keine E-Mail-Adresse — das ist eine technische OAuth2-App-ID.\n"
+            text="Technische OAuth2-App-ID (keine E-Mail).\n"
                  "Leer lassen: automatische Registrierung wird versucht.",
             bg=BG_PANEL, fg=ACCENT_YELLOW, font=("Segoe UI", 8),
             justify="left", anchor="w",
@@ -395,6 +434,7 @@ class AdminPanel(tk.Toplevel):
         self.var_or_batch.set(os.getenv("OPENROUTER_BATCH_MODEL", DEFAULT_BATCH_MODELS["openrouter"]))
         self.var_or_single.set(os.getenv("OPENROUTER_SINGLE_MODEL", DEFAULT_SINGLE_MODELS["openrouter"]))
         self.var_ms_client_id.set(os.getenv("MORNINGSTAR_CLIENT_ID", ""))
+        self.var_ms_email.set(os.getenv("MORNINGSTAR_EMAIL", ""))
         self._refresh_ms_login_status()
 
     def _validate_key(self):
@@ -471,6 +511,71 @@ class AdminPanel(tk.Toplevel):
             text="✔ Gültig" if ok else "✘ Ungültig",
             fg=ACCENT_GREEN if ok else ACCENT_RED,
         )
+
+    def _login_ms_password(self):
+        """OAuth2 Resource Owner Password Credentials (ROPC) — kein Browser nötig."""
+        email    = self.var_ms_email.get().strip()
+        password = self.var_ms_password.get()
+        if not email or not password:
+            messagebox.showwarning(
+                "Eingabe fehlt", "Bitte E-Mail und Passwort eingeben.", parent=self
+            )
+            return
+
+        self._btn_pw_login.config(state="disabled")
+        self._ms_pw_status.config(text="Anmeldung läuft...", fg=FG_MUTED)
+
+        def run():
+            try:
+                from morningstar_client import discover_auth_endpoints, login_with_password
+                endpoints = discover_auth_endpoints()
+                token_url = endpoints.get("token_endpoint", "")
+                if not token_url:
+                    raise RuntimeError("Kein token_endpoint ermittelt.")
+
+                client_id = self.var_ms_client_id.get().strip()
+                if "@" in client_id:
+                    client_id = ""
+
+                tokens = login_with_password(email, password, token_url, client_id)
+
+                from datetime import datetime, timedelta
+                access_token = tokens["access_token"]
+                expires_in   = int(tokens.get("expires_in", 3600))
+                expires_at   = (datetime.now() + timedelta(seconds=expires_in)).isoformat()
+                refresh_tok  = tokens.get("refresh_token", "")
+
+                for key, val in [
+                    ("MORNINGSTAR_ACCESS_TOKEN",  access_token),
+                    ("MORNINGSTAR_TOKEN_EXPIRES", expires_at),
+                    ("MORNINGSTAR_TOKEN_URL",     token_url),
+                ]:
+                    set_key(".env", key, val)
+                    os.environ[key] = val
+                if refresh_tok:
+                    set_key(".env", "MORNINGSTAR_REFRESH_TOKEN", refresh_tok)
+                    os.environ["MORNINGSTAR_REFRESH_TOKEN"] = refresh_tok
+                # E-Mail speichern (Passwort wird nie gespeichert)
+                set_key(".env", "MORNINGSTAR_EMAIL", email)
+                os.environ["MORNINGSTAR_EMAIL"] = email
+
+                msg = f"✔ Angemeldet — Token gültig ~{expires_in // 60} Min."
+                self.after(0, lambda: self._on_ms_pw_login_done(True, msg))
+
+            except Exception as exc:
+                err = str(exc)
+                self.after(0, lambda e=err: self._on_ms_pw_login_done(False, e))
+                self.after(0, lambda e=err: messagebox.showerror(
+                    "Login-Fehler", e, parent=self
+                ))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_ms_pw_login_done(self, ok: bool, msg: str):
+        self._btn_pw_login.config(state="normal")
+        self._ms_pw_status.config(text=msg[:120], fg=ACCENT_GREEN if ok else ACCENT_RED)
+        if ok:
+            self._refresh_ms_login_status()
 
     def _login_ms_browser(self):
         """Startet den OAuth2 Authorization Code + PKCE Browser-Login."""
