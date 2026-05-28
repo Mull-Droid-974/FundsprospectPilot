@@ -50,6 +50,7 @@ _SEED: list[tuple] = [
     ("kundentyp", "Privatanleger",                                               "retail",        "retail investors, private clients, Retail, Privatkunden", 19),
     ("kundentyp", "Mindestanlage (retail)",                                      "retail",        "low minimum investment, retail minimum, kleines Mindestinvestment", 20),
     ("kundentyp", "Mindestanlage (institutionell)",                              "institutional", "high minimum investment, large minimum, hohes Mindestinvestment", 21),
+    ("kundentyp", "Eigene / Ehemalige Mitarbeiter",                             "institutional", "own employees, former employees, Mitarbeiter, ehemalige Mitarbeiter, staff fund, employee fund, Mitarbeiterfonds", 22),
 ]
 
 
@@ -74,13 +75,10 @@ def init_typologie_db():
                 UNIQUE(feld, wert)
             )
         """)
-        # Seed nur einfügen wenn Tabelle leer
-        count = con.execute("SELECT COUNT(*) FROM typologie").fetchone()[0]
-        if count == 0:
-            con.executemany(
-                "INSERT OR IGNORE INTO typologie (feld, wert, segment, synonyme, sortierung) VALUES (?,?,?,?,?)",
-                _SEED,
-            )
+        con.executemany(
+            "INSERT OR IGNORE INTO typologie (feld, wert, segment, synonyme, sortierung) VALUES (?,?,?,?,?)",
+            _SEED,
+        )
 
 
 def get_alle_werte() -> list[dict]:

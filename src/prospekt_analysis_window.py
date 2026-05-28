@@ -159,6 +159,7 @@ _STATUS_TEXT = {
 
 _COLS = [
     ("pdf",       "PDF",                40, "center"),
+    ("trim",      "✂",                  30, "center"),
     ("name",      "Subfonds / Name",   270, "w"),
     ("umbrella",  "Umbrella",          170, "w"),
     ("total",     "ISINs",              55, "center"),
@@ -206,6 +207,8 @@ class ProspektAnalysisWindow(tk.Toplevel):
         self._prompt = DEFAULT_PROMPT
         self._table_data: list[dict] = []
         self._batch_errors: list[str] = []
+        self._sort_col: str = "status"
+        self._sort_asc: bool = True
 
         self._build_ui()
         self._refresh_data()
@@ -439,6 +442,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
             background=BG_PANEL,  foreground=FG_MUTED)
 
         self._tree.bind("<Double-1>", self._on_double_click)
+        self._tree.bind("<ButtonRelease-1>", self._on_single_click)
 
     def _build_progress(self):
         prog_frame = tk.Frame(self, bg=BG_MAIN)
@@ -485,6 +489,11 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()
                 for r in rows
             )
+            has_trimmed = any(
+                r.get("prospekt_pfad")
+                and Path(r["prospekt_pfad"]).with_suffix(".trimmed.txt").exists()
+                for r in rows
+            )
             n_analyzed = sum(1 for r in rows if r.get("llm_segmentierung"))
             n_pending  = len(rows) - n_analyzed
 
@@ -527,8 +536,9 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 "pending":   n_pending,
                 "analyzed":  n_analyzed,
                 "status":    status,
-                "last_date": last_date,
-                "has_pdf":   has_pdf,
+                "last_date":   last_date,
+                "has_pdf":     has_pdf,
+                "has_trimmed": has_trimmed,
             })
 
         # Zusammenfassung
@@ -566,6 +576,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
             date_disp    = item["last_date"][:16] if item["last_date"] else "—"
             self._tree.insert("", "end", iid=item["key"], values=(
                 "✓" if item["has_pdf"] else "✗",
+                "✂" if item["has_trimmed"] else "—",
                 item["name"][:70],
                 item["umbrella"],
                 item["total"],
@@ -574,12 +585,39 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 date_disp,
             ), tags=(item["status"],))
 
+        self._apply_sort()
+
     def _sort_by(self, col: str):
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._apply_sort()
+
+    def _apply_sort(self):
+        col = self._sort_col
+        if not col:
+            return
+        _num_cols = {"total", "pending"}
+
+        def _key(val: str):
+            if col in _num_cols:
+                try:
+                    return (0, int(val))
+                except ValueError:
+                    return (1, 0)
+            return (0, val.lower())
+
         items = [(self._tree.set(iid, col), iid)
                  for iid in self._tree.get_children()]
-        items.sort(key=lambda x: x[0].lower())
+        items.sort(key=lambda x: _key(x[0]), reverse=not self._sort_asc)
         for idx, (_, iid) in enumerate(items):
             self._tree.move(iid, "", idx)
+
+        arrow = " ▲" if self._sort_asc else " ▼"
+        for c, header, _, _ in _COLS:
+            self._tree.heading(c, text=(header + arrow) if c == col else header)
 
     # ─── Analyse starten ──────────────────────────────────────────────────────
 
@@ -625,6 +663,23 @@ class ProspektAnalysisWindow(tk.Toplevel):
             )
             return
         self._run_analysis(groups)
+
+    def _on_single_click(self, event):
+        if self._tree.identify_column(event.x) != "#1":
+            return
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        item = next((d for d in self._table_data if d["key"] == iid), None)
+        if not item or not item["has_pdf"]:
+            return
+        pdf_path = next(
+            (r["prospekt_pfad"] for r in item["rows"]
+             if r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()),
+            None,
+        )
+        if pdf_path:
+            os.startfile(pdf_path)
 
     def _on_double_click(self, event):
         iid = self._tree.identify_row(event.y)

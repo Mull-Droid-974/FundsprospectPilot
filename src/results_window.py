@@ -355,7 +355,7 @@ class ResultsWindow(tk.Toplevel):
             ("Identifikation", ["isin", "fondsname", "subfonds_name", "anteilsklasse",
                                 "ausschuettungsart", "fondswaehrung"]),
             ("Analyse", ["segmentierung", "fondstyp", "anlegertyp", "kundentyp",
-                         "konfidenz", "analysiert_am"]),
+                         "mindestanlage", "konfidenz", "analysiert_am"]),
             ("LLM-Segmentierung", ["llm_segmentierung", "llm_segmentierung_begruendung"]),
             ("Fundinfo API", ["fundinfo_ter", "fundinfo_investor_type", "umbrella_id",
                               "ongoing_charges_datum", "qualif_anleger_ch", "institutional_ch"]),
@@ -363,7 +363,6 @@ class ResultsWindow(tk.Toplevel):
                              "ms_mifid_category", "ms_rating", "ms_share_class_status",
                              "ms_inception_date", "ms_termination_date"]),
             ("Prospekt", ["prospekt_url", "prospekt_pfad"]),
-            ("Rohdaten LLM", ["fondstyp_roh", "anlegertyp_roh", "kundentyp_roh"]),
         ]
 
         _LABELS = {k: h for k, h, _ in _COLS}
@@ -372,6 +371,13 @@ class ResultsWindow(tk.Toplevel):
             _LABELS.update({k: v[1] for k, v in _MS_DP.items()})
         except Exception:
             pass
+
+        _ROH_MAP = {
+            "fondstyp":      "fondstyp_roh",
+            "anlegertyp":    "anlegertyp_roh",
+            "kundentyp":     "kundentyp_roh",
+            "mindestanlage": "mindestanlage_roh",
+        }
 
         for group_title, keys in _GROUPS:
             # Gruppenheader
@@ -388,7 +394,8 @@ class ResultsWindow(tk.Toplevel):
             for key in keys:
                 val = str(row.get(key) or "—")
                 label = _LABELS.get(key, key)
-                is_long = len(val) > 80 or "\n" in val
+                roh_key = _ROH_MAP.get(key)
+                roh_val = str(row.get(roh_key) or "") if roh_key else ""
 
                 row_frame = tk.Frame(inner, bg=BG_PANEL)
                 row_frame.pack(fill="x", padx=14, pady=1)
@@ -400,9 +407,13 @@ class ResultsWindow(tk.Toplevel):
                     width=22, anchor="nw",
                 ).pack(side="left", padx=(8, 4), pady=4)
 
+                val_frame = tk.Frame(row_frame, bg=BG_PANEL)
+                val_frame.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=2)
+
+                is_long = len(val) > 80 or "\n" in val
                 if is_long:
                     txt = tk.Text(
-                        row_frame, bg=BG_PANEL, fg=FG_TEXT,
+                        val_frame, bg=BG_PANEL, fg=FG_TEXT,
                         font=("Segoe UI", 9),
                         relief="flat", wrap="word",
                         height=min(6, val.count("\n") + len(val) // 60 + 1),
@@ -410,14 +421,35 @@ class ResultsWindow(tk.Toplevel):
                     )
                     txt.insert("1.0", val)
                     txt.configure(state="disabled")
-                    txt.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=4)
+                    txt.pack(fill="x", pady=(2, 0))
                 else:
                     tk.Label(
-                        row_frame, text=val,
+                        val_frame, text=val,
                         bg=BG_PANEL, fg=FG_TEXT,
                         font=("Segoe UI", 9),
                         anchor="nw", justify="left",
-                    ).pack(side="left", fill="x", expand=True, padx=(0, 8), pady=4)
+                    ).pack(fill="x", pady=(2, 0))
+
+                if roh_val:
+                    roh_is_long = len(roh_val) > 80 or "\n" in roh_val
+                    if roh_is_long:
+                        roh_txt = tk.Text(
+                            val_frame, bg=BG_PANEL, fg=FG_DIM,
+                            font=("Segoe UI", 7),
+                            relief="flat", wrap="word",
+                            height=min(3, roh_val.count("\n") + len(roh_val) // 70 + 1),
+                            bd=0,
+                        )
+                        roh_txt.insert("1.0", roh_val)
+                        roh_txt.configure(state="disabled")
+                        roh_txt.pack(fill="x", pady=(0, 2))
+                    else:
+                        tk.Label(
+                            val_frame, text=roh_val,
+                            bg=BG_PANEL, fg=FG_DIM,
+                            font=("Segoe UI", 7),
+                            anchor="nw", justify="left",
+                        ).pack(fill="x", pady=(0, 2))
 
         # Schliessen-Button
         tk.Button(

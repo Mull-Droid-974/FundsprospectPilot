@@ -427,7 +427,7 @@ class PdfTrimWindow(tk.Toplevel):
             activebackground=BTN_ACTIVE)
         self._btn_run.pack(side="right", padx=(4, 0))
 
-        self._auto_var = tk.BooleanVar(value=False)
+        self._auto_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             inner, text="Auto-speichern",
             variable=self._auto_var,
@@ -542,24 +542,43 @@ class PdfTrimWindow(tk.Toplevel):
         right = tk.Frame(main, bg=BG_MAIN)
         right.pack(side="left", fill="both", expand=True)
 
+        # Fixe Elemente zuerst von unten verankern, damit expand=True der
+        # Vorschau sie nicht aus dem sichtbaren Bereich drängt.
+        bottom = tk.Frame(right, bg=BG_MAIN)
+        bottom.pack(side="bottom", fill="x")
+
+        # Vorschau — expandiert in den verbleibenden Platz (nach bottom packen!)
         tk.Label(right, text="Vorschau / Ergebnis",
                  bg=BG_MAIN, fg=FG_MUTED,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(4, 2))
-
         self._preview = scrolledtext.ScrolledText(
             right, height=14, bg=BG_INPUT, fg=FG_TEXT,
             font=("Consolas", 8), state="disabled",
             insertbackground=FG_TEXT, relief="flat", wrap="word")
         self._preview.pack(fill="both", expand=True)
 
-        # Tabellen-Info-Zeile
-        self._tab_label = tk.Label(
-            right, text="Tabellen: —",
-            bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8), anchor="w")
-        self._tab_label.pack(fill="x", pady=(2, 0))
+        # Log
+        tk.Label(bottom, text="Log", bg=BG_MAIN, fg=FG_MUTED,
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
+        self._log = scrolledtext.ScrolledText(
+            bottom, height=4, bg=BG_INPUT, fg=FG_TEXT,
+            font=("Consolas", 8), state="disabled",
+            insertbackground=FG_TEXT, relief="flat")
+        self._log.pack(fill="x", pady=(0, 8))
 
-        # Speichern/Verwerfen (nur nach LLM-Ergebnis ohne Auto-speichern)
-        self._confirm_frame = tk.Frame(right, bg=BG_MAIN)
+        # Prompt-Bereich
+        tk.Label(bottom, text="Trim-Prompt (editierbar)",
+                 bg=BG_MAIN, fg=FG_MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        self._prompt_box = scrolledtext.ScrolledText(
+            bottom, height=6, bg=BG_INPUT, fg=FG_TEXT,
+            font=("Consolas", 8), insertbackground=FG_TEXT,
+            relief="flat", wrap="word")
+        self._prompt_box.pack(fill="x")
+        self._prompt_box.insert("1.0", _DEFAULT_PROMPT)
+
+        # Speichern/Verwerfen (erscheint nach LLM-Ergebnis ohne Auto-speichern)
+        self._confirm_frame = tk.Frame(bottom, bg=BG_MAIN)
         tk.Button(
             self._confirm_frame, text="✔  Speichern",
             command=self._save_trimmed,
@@ -575,26 +594,11 @@ class PdfTrimWindow(tk.Toplevel):
             activebackground=BTN_ACTIVE,
         ).pack(side="left")
 
-        # Prompt-Bereich
-        tk.Label(right, text="Trim-Prompt (editierbar)",
-                 bg=BG_MAIN, fg=FG_MUTED,
-                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
-
-        self._prompt_box = scrolledtext.ScrolledText(
-            right, height=7, bg=BG_INPUT, fg=FG_TEXT,
-            font=("Consolas", 8), insertbackground=FG_TEXT,
-            relief="flat", wrap="word")
-        self._prompt_box.pack(fill="x")
-        self._prompt_box.insert("1.0", _DEFAULT_PROMPT)
-
-        # Log
-        tk.Label(right, text="Log", bg=BG_MAIN, fg=FG_MUTED,
-                 font=("Segoe UI", 8)).pack(anchor="w", pady=(4, 0))
-        self._log = scrolledtext.ScrolledText(
-            right, height=4, bg=BG_INPUT, fg=FG_TEXT,
-            font=("Consolas", 8), state="disabled",
-            insertbackground=FG_TEXT, relief="flat")
-        self._log.pack(fill="x", pady=(0, 8))
+        # Tabellen-Info-Zeile
+        self._tab_label = tk.Label(
+            bottom, text="Tabellen: —",
+            bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8), anchor="w")
+        self._tab_label.pack(fill="x", pady=(2, 0))
 
     # ─── Daten ───────────────────────────────────────────────────────────────
 

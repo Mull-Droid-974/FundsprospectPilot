@@ -62,6 +62,22 @@ DEFAULT_SELECTED: list[str] = [
 
 _BATCH_SIZE = 20
 
+# Morningstar MCP Datapoint-IDs für unsere internen Felder (via id-lookup-tool ermittelt)
+_DP_ID_MAP: dict[str, str] = {
+    "ms_category":           "OF003",  # Morningstar Category
+    "ms_rating":             "RR01Y",  # Morningstar Rating Overall
+    "ms_investor_type":      "OS00N",  # Institutional flag
+    "ms_inception_date":     "OS00F",  # Inception Date
+    "ms_ongoing_charge":     "OS05P",  # Ongoing Charge / TER
+    "ms_min_investment":     "OS388",  # Minimum Investment (Base Currency)
+    "ms_domicile":           "LS017",  # Domicile
+    "ms_currency":           "LS468",  # Portfolio Currency
+    "ms_share_class_status": "OS999",  # Status (Active/Inactive)
+    "ms_share_class_type":   "LS012",  # Share Class Type
+    "ms_risk_rating":        "RR04W",  # Morningstar Risk Rating Overall
+    "ms_name":               "OS01W",  # Fund Name
+}
+
 
 # ─── OAuth2 Discovery & Browser-Login ───────────────────────────────────────
 
@@ -172,7 +188,7 @@ def _try_dynamic_registration(registration_endpoint: str, redirect_uri: str) -> 
             json={
                 "client_name":                "FundProspektPilot",
                 "redirect_uris":              [redirect_uri],
-                "grant_types":                ["authorization_code"],
+                "grant_types":                ["authorization_code", "password", "refresh_token"],
                 "response_types":             ["code"],
                 "token_endpoint_auth_method": "none",
                 "application_type":           "native",
@@ -495,21 +511,32 @@ class _MCPSession:
         return data.get("result", {})
 
     def _read_sse(self, resp) -> dict:
-        """Liest einen SSE-Stream und gibt das erste result-Event zurück."""
+        """Liest einen SSE-Stream — akkumuliert multi-line data:-Chunks pro Event."""
+        data_chunks: list[str] = []
         for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            raw = line[5:].strip()
-            if raw == "[DONE]":
-                break
+            if line.startswith("data:"):
+                data_chunks.append(line[5:].strip())
+            elif not line and data_chunks:
+                raw = "".join(data_chunks)
+                data_chunks = []
+                if raw == "[DONE]":
+                    break
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if "error" in data:
+                    raise RuntimeError(f"MCP-Fehler: {data['error']}")
+                if "result" in data:
+                    return data["result"]
+        # Stream-Ende ohne Leerzeile (einige Server)
+        if data_chunks:
             try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if "error" in data:
-                raise RuntimeError(f"MCP-Fehler: {data['error']}")
-            if "result" in data:
-                return data["result"]
+                data = json.loads("".join(data_chunks))
+                if "result" in data:
+                    return data["result"]
+            except Exception:
+                pass
         raise RuntimeError("MCP: Kein Ergebnis im SSE-Stream empfangen.")
 
     def initialize(self):
@@ -518,7 +545,6 @@ class _MCPSession:
             "capabilities": {},
             "clientInfo": {"name": "FundProspektPilot", "version": "1.0"},
         })
-        # Pflicht-Notification nach erfolgreicher Initialisierung
         self._post("notifications/initialized", {}, expect_response=False)
         return result
 
@@ -528,7 +554,9 @@ class _MCPSession:
 
     def call_tool(self, name: str, arguments: dict) -> dict:
         result = self._post("tools/call", {"name": name, "arguments": arguments})
-        return result if isinstance(result, dict) else {}
+        if isinstance(result, dict):
+            return result.get("structuredContent") or result
+        return {}
 
 
 # ─── Öffentliche API ─────────────────────────────────────────────────────────
@@ -558,47 +586,79 @@ def fetch_datapoints(
     data_url: str = None,       # veraltet, wird ignoriert
 ) -> dict[str, dict]:
     """
-    Ruft Morningstar-Daten für eine Liste von ISINs via MCP ab.
+    Ruft Morningstar-Daten für eine Liste von ISINs via MCP ab (2-Schritt-Flow):
+      1. morningstar-id-lookup-tool: ISIN → Morningstar investment_id
+      2. morningstar-data-tool:      investment_id + datapoint_ids → Werte
 
     Returns:
-        {isin: {internal_key: value, ..., "ms_raw_json": "..."}}
+        {ISIN_upper: {internal_key: value, ...}}
     """
     if not all([isins, field_keys, token]):
         return {}
 
-    api_fields = [
-        AVAILABLE_DATAPOINTS[k][0]
-        for k in field_keys
-        if k in AVAILABLE_DATAPOINTS
-    ]
+    import datetime
+    today = datetime.date.today().isoformat()
 
-    sess = _MCPSession(token)
-    sess.initialize()
-
-    # Tools entdecken
-    raw_tools = sess.list_tools()
-    tools = {t.get("name", ""): t for t in raw_tools}
-    logger.info(f"Morningstar MCP Tools: {list(tools.keys())}")
-
-    tool_name, build_args = _pick_tool(tools, api_fields)
-    if not tool_name:
+    # Datapoint-IDs für angeforderte Felder
+    dp_ids = [_DP_ID_MAP[k] for k in field_keys if k in _DP_ID_MAP]
+    rev_map = {v: k for k, v in _DP_ID_MAP.items() if k in field_keys}
+    if not dp_ids:
         raise RuntimeError(
-            f"Kein passendes ISIN-Tool gefunden. "
-            f"Verfügbar: {list(tools.keys())}"
+            "Keine MCP-Datapoint-IDs für die gewählten Felder. "
+            "Bitte andere Attribute wählen."
         )
-    logger.info(f"Verwende MCP-Tool: {tool_name}")
 
     results: dict[str, dict] = {}
-    for isin in isins:
+
+    for i in range(0, len(isins), _BATCH_SIZE):
+        batch = isins[i : i + _BATCH_SIZE]
         try:
-            raw = sess.call_tool(tool_name, build_args(isin))
-            item = _extract_item(raw, isin)
-            if item:
-                parsed = _map_fields(item, field_keys)
-                parsed["ms_raw_json"] = json.dumps(item, ensure_ascii=False)[:4000]
-                results[isin.upper()] = parsed
+            sess = _MCPSession(token)
+            sess.initialize()
+
+            # Schritt 1: ISINs → Morningstar investment_ids
+            id_result = sess.call_tool(
+                "morningstar-id-lookup-tool",
+                {"investment_identifiers": batch},
+            )
+            investments = id_result.get("investments", {})
+
+            isin_to_msid: dict[str, str] = {}
+            for isin in batch:
+                hits = investments.get(isin.upper()) or investments.get(isin) or []
+                if not hits:
+                    logger.info(f"Morningstar: keine ID für {isin}")
+                    continue
+                # F...-IDs sind Fonds-Level (besser für Stammdaten), 0P...-IDs sind Anteilsklassen
+                preferred = next((h for h in hits if h["morningstar_id"].startswith("F")), hits[0])
+                isin_to_msid[isin.upper()] = preferred["morningstar_id"]
+
+            if not isin_to_msid:
+                continue
+
+            # Schritt 2: Daten abrufen
+            ms_ids = list(set(isin_to_msid.values()))
+            data_result = sess.call_tool(
+                "morningstar-data-tool",
+                {"investment_ids": ms_ids, "datapoint_ids": dp_ids},
+            )
+            result_by_msid = data_result.get("result", {})
+
+            for isin_upper, ms_id in isin_to_msid.items():
+                ms_entry = result_by_msid.get(ms_id, {})
+                values   = ms_entry.get("values", [])
+                parsed   = {
+                    rev_map[v["datapointId"]]: str(v.get("value") or "")
+                    for v in values
+                    if v.get("datapointId") in rev_map
+                }
+                if parsed:
+                    parsed["ms_fetch_date"] = today
+                    results[isin_upper] = parsed
+                    logger.info(f"Morningstar: {isin_upper} → {len(parsed)} Felder")
+
         except Exception as exc:
-            logger.warning(f"MCP-Abruf fehlgeschlagen für {isin}: {exc}")
+            logger.warning(f"Morningstar Batch-Fehler {batch}: {exc}")
 
     return results
 
