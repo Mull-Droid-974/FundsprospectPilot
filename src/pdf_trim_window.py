@@ -1,12 +1,13 @@
 """
-PDF-Trim-Maske — Intelligentes Kürzen von Fondsprospekten per LLM.
+PDF-Trim-Maske — Intelligentes Kürzen / Extrahieren von Fondsprospekten per LLM.
 
 Liest alle PDFs aus data/prospekte/ und ermöglicht:
 - Strukturierte Tabellenextraktion  (→ .tables.json neben dem PDF)
 - LLM-gestütztes Kürzen            (→ .trimmed.txt neben dem PDF)
+- LLM-gestützte JSON-Extraktion    (→ .extracted.json neben dem PDF)
+  Chunk-weise Extraktion ohne Informationsverlust, bevorzugt von der
+  Analyse-Pipeline gegenüber .trimmed.txt.
 
-Die Analyse-Pipeline (llm_analysis_worker) bevorzugt .trimmed.txt
-automatisch, und injiziert .tables.json als strukturierten Kontext.
 Original-PDF bleibt immer unangetastet.
 """
 
@@ -73,6 +74,156 @@ ENTFERNEN (weglassen):
 Gib NUR den gekürzten Text zurück — kein Kommentar, keine Erklärung, \
 keine Markdown-Formatierung.\
 """
+
+
+# ─── Chunking ────────────────────────────────────────────────────────────────
+
+_CHUNK_MAX_CHARS = 150_000   # ~37.5K Tokens — unter dem 50K/min-Rate-Limit
+_CHUNK_MIN_INTERVAL = 62     # Mindest-Abstand (s) zwischen Chunk-Starts (Rate-Limit)
+
+
+def _chunk_text(text: str, max_chars: int = _CHUNK_MAX_CHARS) -> list[str]:
+    """Teilt Text in Chunks ≤ max_chars, bevorzugt Absatz-Grenzen (\n\n)."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + max_chars
+        if end >= len(text):
+            chunks.append(text[start:])
+            break
+        split_pos = text.rfind("\n\n", start, end)
+        if split_pos <= start:
+            split_pos = end
+        else:
+            split_pos += 2
+        chunks.append(text[start:split_pos])
+        start = split_pos
+    return chunks
+
+
+# ─── Extraktion: Prompt + Merge-Logik ────────────────────────────────────────
+
+_EXTRACT_PROMPT = """\
+Du bist ein Experte für Fondsprospekte (Schweizer KAG/FIDLEG, UCITS, AIFMD, MiFID II).
+
+Analysiere den folgenden Prospekt-Abschnitt und extrahiere alle relevanten Informationen \
+in der nachfolgenden JSON-Struktur. Extrahiere NUR was direkt im Text steht.
+
+HIERARCHIE:
+1. UMBRELLA: Dachfonds-Ebene (Name, Rechtsform, Domizil, Regulierung)
+2. PORTFOLIO: Subfonds-Ebene (Anlageziel, Fondstyp, Anleger-Beschränkungen)
+3. ANTEILSKLASSE: Klassenspezifische Details (ISIN, Mindestanlage, Anlegertyp)
+
+REGELN:
+- Felder die nicht im Text vorkommen: leer lassen ("" oder [])
+- Anteilsklassen nur wenn ISIN oder Klassenname explizit im Text steht
+- Prosa-Texte kurz zusammenfassen (max. 200 Zeichen)
+- Irrelevantes ignorieren: Steuerhinweise, Performance, allgemeine Risikobeschreibungen \
+  ohne Anlegerbezug, Verwaltungsdetails ohne Bezug zu Anlegertypen
+- Gib NUR gültiges JSON zurück, keinen anderen Text
+- Falls keine relevanten Informationen: {}
+
+AUSGABE-SCHEMA:
+{
+  "umbrella": {
+    "name": "",
+    "rechtsform": "",
+    "domizil": "",
+    "regulierung": "",
+    "verwaltungsgesellschaft": "",
+    "allg_anleger_beschraenkung": ""
+  },
+  "portfolios": [
+    {
+      "name": "",
+      "fondstyp": "",
+      "anlageziel_kurz": "",
+      "anleger_beschraenkung": "",
+      "mifid_kategorie": "",
+      "anteilsklassen": [
+        {
+          "isin": "",
+          "klasse_name": "",
+          "waehrung": "",
+          "mindestanlage": "",
+          "anlegertyp_beschraenkung": "",
+          "vertrieb_laender": [],
+          "ter": "",
+          "ausschuettung": ""
+        }
+      ]
+    }
+  ]
+}\
+"""
+
+
+def _merge_extracted(base: dict, new: dict) -> dict:
+    """Führt zwei chunk-weise extrahierte JSON-Dicts zusammen (non-destructive merge)."""
+    if not new:
+        return base
+    if not base:
+        return dict(new)
+
+    # Umbrella: leere Felder mit neuen Werten befüllen
+    if new.get("umbrella"):
+        if "umbrella" not in base:
+            base["umbrella"] = {}
+        for k, v in new["umbrella"].items():
+            if v and not base["umbrella"].get(k):
+                base["umbrella"][k] = v
+
+    # Portfolios: nach Name zusammenführen
+    for new_pf in (new.get("portfolios") or []):
+        pf_name = (new_pf.get("name") or "").strip().lower()
+        matched_pf = None
+        for base_pf in (base.get("portfolios") or []):
+            base_name = (base_pf.get("name") or "").strip().lower()
+            if base_name and pf_name and (
+                base_name == pf_name or
+                base_name in pf_name or
+                pf_name in base_name
+            ):
+                matched_pf = base_pf
+                break
+
+        if matched_pf is None:
+            base.setdefault("portfolios", []).append(new_pf)
+        else:
+            # Portfolio-Felder ergänzen
+            for k, v in new_pf.items():
+                if k == "anteilsklassen":
+                    continue
+                if v and not matched_pf.get(k):
+                    matched_pf[k] = v
+
+            # Anteilsklassen zusammenführen
+            for new_kl in (new_pf.get("anteilsklassen") or []):
+                new_isin  = (new_kl.get("isin")        or "").strip().upper()
+                new_kname = (new_kl.get("klasse_name") or "").strip().lower()
+                matched_kl = None
+                for base_kl in matched_pf.setdefault("anteilsklassen", []):
+                    base_isin  = (base_kl.get("isin")        or "").strip().upper()
+                    base_kname = (base_kl.get("klasse_name") or "").strip().lower()
+                    if (new_isin and base_isin and new_isin == base_isin) or \
+                       (new_kname and base_kname and new_kname == base_kname):
+                        matched_kl = base_kl
+                        break
+
+                if matched_kl is None:
+                    matched_pf["anteilsklassen"].append(new_kl)
+                else:
+                    for k, v in new_kl.items():
+                        if k == "vertrieb_laender":
+                            existing = matched_kl.get("vertrieb_laender") or []
+                            merged   = list(dict.fromkeys(existing + (v or [])))
+                            if merged:
+                                matched_kl["vertrieb_laender"] = merged
+                        elif v and not matched_kl.get(k):
+                            matched_kl[k] = v
+    return base
 
 
 # ─── Worker ──────────────────────────────────────────────────────────────────
@@ -178,7 +329,7 @@ class _TrimWorker(threading.Thread):
         try:
             # 1. Tabellen extrahieren (schnell, synchron)
             self._queue.put(("log", "Tabellen extrahieren …"))
-            tables = pdf_analyzer.extract_tables_from_pdf(self._pdf_path)
+            tables = pdf_analyzer.extract_tables_from_pdf(self._pdf_path, max_pages=None)
             pdf_analyzer.save_tables_json(self._pdf_path, tables)
             self._queue.put(("tables", tables))
             self._queue.put(("log", f"{len(tables)} Tabelle(n) gefunden und gespeichert"))
@@ -189,25 +340,48 @@ class _TrimWorker(threading.Thread):
 
             # 2. Volltext extrahieren (für LLM-Trim immer Volltext, nicht gefiltert)
             self._queue.put(("log", "Volltext extrahieren …"))
-            full_text = pdf_analyzer.extract_text_from_pdf(self._pdf_path) or ""
+            full_text = pdf_analyzer.extract_text_from_pdf(self._pdf_path, max_pages=None) or ""
             if not full_text:
                 self._queue.put(("error", "Kein Text aus PDF extrahierbar"))
                 self._queue.put(("done", None))
                 return
             orig_len = len(full_text)
-            self._queue.put(("log", f"{orig_len:,} Zeichen → LLM kürzt …"))
+            chunks = _chunk_text(full_text)
+            if len(chunks) > 1:
+                self._queue.put(("log",
+                    f"{orig_len:,} Zeichen → {len(chunks)} Chunks à ≤{_CHUNK_MAX_CHARS:,} Zeichen"))
+            else:
+                self._queue.put(("log", f"{orig_len:,} Zeichen → LLM kürzt …"))
 
             if self._stop_flag:
                 self._queue.put(("done", None))
                 return
 
-            # 3. LLM-Trim
-            try:
-                trimmed = self._call_llm(full_text)
-            except Exception as exc:
-                self._queue.put(("error", str(exc)))
-                self._queue.put(("done", None))
-                return
+            # 3. LLM-Trim (chunk-weise)
+            import time as _time
+            trimmed_parts = []
+            for i, chunk in enumerate(chunks):
+                if self._stop_flag:
+                    self._queue.put(("done", None))
+                    return
+                if len(chunks) > 1:
+                    self._queue.put(("log",
+                        f"  Chunk {i + 1}/{len(chunks)} ({len(chunk):,} Zeichen) …"))
+                t_start = _time.time()
+                try:
+                    part = self._call_llm(chunk)
+                except Exception as exc:
+                    self._queue.put(("error", str(exc)))
+                    self._queue.put(("done", None))
+                    return
+                trimmed_parts.append(part)
+                if len(chunks) > 1 and i < len(chunks) - 1:
+                    wait = max(0.0, _CHUNK_MIN_INTERVAL - (_time.time() - t_start))
+                    if wait > 0:
+                        self._queue.put(("log", f"  Rate-Limit-Pause {wait:.0f}s …"))
+                        _time.sleep(wait)
+
+            trimmed = "\n\n".join(trimmed_parts)
             reduction = 100 - int(len(trimmed) / max(orig_len, 1) * 100)
             self._queue.put(("trimmed", trimmed))
             self._queue.put(("log",
@@ -307,10 +481,10 @@ class _BatchTrimWorker(threading.Thread):
             return
         name = Path(pdf_path).name
         try:
-            tables = pdf_analyzer.extract_tables_from_pdf(pdf_path)
+            tables = pdf_analyzer.extract_tables_from_pdf(pdf_path, max_pages=None)
             pdf_analyzer.save_tables_json(pdf_path, tables)
 
-            full_text = pdf_analyzer.extract_text_from_pdf(pdf_path) or ""
+            full_text = pdf_analyzer.extract_text_from_pdf(pdf_path, max_pages=None) or ""
             if not full_text:
                 self._emit("log", f"  ⚠ {name}: Kein Text extrahierbar — übersprungen")
                 with self._lock:
@@ -318,19 +492,36 @@ class _BatchTrimWorker(threading.Thread):
                 self._emit("batch_progress", (done, total, pdf_path))
                 return
 
-            try:
-                trimmed = self._call_llm(full_text)
-            except Exception as exc:
-                msg = str(exc)
-                if "API-Key" in msg or "Ungültig" in msg:
-                    self._emit("log", f"✗ {name}: {msg} — Batch abgebrochen.")
-                    self._stop_flag = True
+            chunks = _chunk_text(full_text)
+            if len(chunks) > 1:
+                self._emit("log",
+                    f"  {name}: {len(full_text):,} Zeichen → {len(chunks)} Chunks …")
+            import time as _time
+            trimmed_parts = []
+            for i, chunk in enumerate(chunks):
+                if self._stop_flag:
                     return
-                self._emit("log", f"  ✗ {name}: {msg}")
-                with self._lock:
-                    done = self._done
-                self._emit("batch_progress", (done, total, pdf_path))
-                return
+                t_start = _time.time()
+                try:
+                    part = self._call_llm(chunk)
+                except Exception as exc:
+                    msg = str(exc)
+                    if "API-Key" in msg or "Ungültig" in msg:
+                        self._emit("log", f"✗ {name}: {msg} — Batch abgebrochen.")
+                        self._stop_flag = True
+                        return
+                    self._emit("log", f"  ✗ {name} Chunk {i + 1}: {msg}")
+                    with self._lock:
+                        done = self._done
+                    self._emit("batch_progress", (done, total, pdf_path))
+                    return
+                trimmed_parts.append(part)
+                if len(chunks) > 1 and i < len(chunks) - 1:
+                    wait = max(0.0, _CHUNK_MIN_INTERVAL - (_time.time() - t_start))
+                    if wait > 0:
+                        _time.sleep(wait)
+
+            trimmed = "\n\n".join(trimmed_parts)
             out = Path(pdf_path).with_suffix(".trimmed.txt")
             out.write_text(trimmed, encoding="utf-8")
 
@@ -366,6 +557,186 @@ class _BatchTrimWorker(threading.Thread):
                     self._emit("log", f"  ✗ Unerwarteter Fehler: {exc}")
 
         self._emit("batch_done", self._done)
+
+
+# ─── Extractions-Worker ───────────────────────────────────────────────────────
+
+class _ExtractWorker(threading.Thread):
+    """Extrahiert Fondsdaten chunk-weise als JSON und speichert .extracted.json."""
+
+    def __init__(
+        self,
+        pdf_path: str,
+        model: str,
+        api_key: str,
+        result_queue: queue.Queue,
+        provider: str = "anthropic",
+    ):
+        super().__init__(daemon=True)
+        self._pdf_path   = pdf_path
+        self._model      = model
+        self._api_key    = api_key
+        self._provider   = provider.lower()
+        self._queue      = result_queue
+        self._stop_flag  = False
+
+    def stop(self):
+        self._stop_flag = True
+
+    def _call_llm(self, chunk: str) -> dict:
+        if self._provider == "gemini":
+            return self._call_gemini(chunk)
+        if self._provider == "openrouter":
+            return self._call_openrouter(chunk)
+        return self._call_anthropic(chunk)
+
+    def _parse_json(self, raw: str) -> dict:
+        raw = raw.strip()
+        for marker in ("```json", "```"):
+            if marker in raw:
+                raw = raw.split(marker)[1].split("```")[0].strip()
+                break
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        if start < 0 or end <= start:
+            return {}
+        try:
+            return json.loads(raw[start:end])
+        except json.JSONDecodeError:
+            try:
+                from json_repair import repair_json
+                result = repair_json(raw[start:end], return_objects=True)
+                return result if isinstance(result, dict) else {}
+            except Exception:
+                return {}
+
+    def _call_anthropic(self, chunk: str) -> dict:
+        client = anthropic.Anthropic(api_key=self._api_key)
+        try:
+            resp = client.messages.create(
+                model=self._model,
+                max_tokens=4096,
+                system=[{"type": "text", "text": _EXTRACT_PROMPT,
+                          "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": chunk,
+                     "cache_control": {"type": "ephemeral"}},
+                ]}],
+            )
+        except anthropic.AuthenticationError:
+            raise RuntimeError("Ungültiger API-Key — bitte im Admin konfigurieren.")
+        except anthropic.RateLimitError:
+            raise RuntimeError("Rate Limit erreicht — bitte kurz warten.")
+        except anthropic.BadRequestError as exc:
+            raise RuntimeError(f"Eingabe zu lang: {exc}")
+        except anthropic.APIStatusError as exc:
+            raise RuntimeError(f"API-Fehler {exc.status_code}: {exc.message}")
+        raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+        return self._parse_json(raw)
+
+    def _call_gemini(self, chunk: str) -> dict:
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            raise RuntimeError("google-genai nicht installiert.")
+        client = genai.Client(api_key=self._api_key)
+        try:
+            resp = client.models.generate_content(
+                model=self._model,
+                contents=chunk,
+                config=types.GenerateContentConfig(
+                    system_instruction=_EXTRACT_PROMPT,
+                    max_output_tokens=4096,
+                ),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Gemini Fehler: {exc}")
+        return self._parse_json(resp.text if hasattr(resp, "text") else "")
+
+    def _call_openrouter(self, chunk: str) -> dict:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("openai nicht installiert.")
+        client = OpenAI(api_key=self._api_key, base_url="https://openrouter.ai/api/v1")
+        try:
+            resp = client.chat.completions.create(
+                model=self._model,
+                max_tokens=4096,
+                messages=[
+                    {"role": "system", "content": _EXTRACT_PROMPT},
+                    {"role": "user",   "content": chunk},
+                ],
+            )
+        except Exception as exc:
+            raise RuntimeError(f"OpenRouter Fehler: {exc}")
+        raw = (resp.choices[0].message.content or "") if resp.choices else ""
+        return self._parse_json(raw)
+
+    def run(self):
+        import time as _time
+        try:
+            self._queue.put(("log", "Volltext extrahieren (alle Seiten) …"))
+            full_text = pdf_analyzer.extract_text_from_pdf(self._pdf_path, max_pages=None) or ""
+            if not full_text:
+                self._queue.put(("error", "Kein Text aus PDF extrahierbar"))
+                self._queue.put(("done", None))
+                return
+
+            chunks = _chunk_text(full_text)
+            self._queue.put(("log",
+                f"{len(full_text):,} Zeichen → {len(chunks)} Chunk(s) à ≤{_CHUNK_MAX_CHARS:,}"))
+
+            extracted: dict = {}
+            for i, chunk in enumerate(chunks):
+                if self._stop_flag:
+                    self._queue.put(("done", None))
+                    return
+                self._queue.put(("log",
+                    f"  Chunk {i + 1}/{len(chunks)} ({len(chunk):,} Zeichen) extrahieren …"))
+                t_start = _time.time()
+                try:
+                    part = self._call_llm(chunk)
+                except Exception as exc:
+                    self._queue.put(("error", str(exc)))
+                    self._queue.put(("done", None))
+                    return
+                if part:
+                    extracted = _merge_extracted(extracted, part)
+                    n_pf  = len(extracted.get("portfolios") or [])
+                    n_kl  = sum(
+                        len(pf.get("anteilsklassen") or [])
+                        for pf in (extracted.get("portfolios") or [])
+                    )
+                    self._queue.put(("log",
+                        f"    → {n_pf} Portfolio(s), {n_kl} Anteilsklasse(n) bisher"))
+                else:
+                    self._queue.put(("log", "    → keine relevanten Infos gefunden"))
+
+                if len(chunks) > 1 and i < len(chunks) - 1:
+                    wait = max(0.0, _CHUNK_MIN_INTERVAL - (_time.time() - t_start))
+                    if wait > 0:
+                        self._queue.put(("log", f"  Rate-Limit-Pause {wait:.0f}s …"))
+                        _time.sleep(wait)
+
+            # Speichern
+            out = Path(self._pdf_path).with_suffix(".extracted.json")
+            out.write_text(
+                json.dumps(extracted, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            n_pf = len(extracted.get("portfolios") or [])
+            n_kl = sum(
+                len(pf.get("anteilsklassen") or [])
+                for pf in (extracted.get("portfolios") or [])
+            )
+            self._queue.put(("extracted", extracted))
+            self._queue.put(("log",
+                f"Fertig: {n_pf} Portfolio(s), {n_kl} Anteilsklasse(n) → {out.name}"))
+        except Exception as exc:
+            self._queue.put(("error", str(exc)))
+        finally:
+            self._queue.put(("done", None))
 
 
 # ─── Fenster ─────────────────────────────────────────────────────────────────
@@ -420,8 +791,15 @@ class PdfTrimWindow(tk.Toplevel):
             activebackground=BTN_ACTIVE)
         self._btn_batch.pack(side="right", padx=(4, 0))
 
+        self._btn_extract = tk.Button(
+            inner, text="🔍  Extrahieren", command=self._start_extract_worker,
+            bg="#1e1a2e", fg=ACCENT_LAVENDER, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE)
+        self._btn_extract.pack(side="right", padx=(4, 0))
+
         self._btn_run = tk.Button(
-            inner, text="▶  Verarbeiten", command=self._start_worker,
+            inner, text="✂  Trimmen", command=self._start_worker,
             bg="#1a2e1a", fg=ACCENT_GREEN, relief="flat",
             font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
             activebackground=BTN_ACTIVE)
@@ -498,7 +876,7 @@ class PdfTrimWindow(tk.Toplevel):
 
         self._tree = ttk.Treeview(
             list_frame,
-            columns=("name", "trim", "tab", "isins"),
+            columns=("name", "trim", "ext", "tab", "isins"),
             show="headings", selectmode="browse",
         )
         style = ttk.Style(self)
@@ -512,12 +890,14 @@ class PdfTrimWindow(tk.Toplevel):
 
         self._tree.heading("name",  text="Datei")
         self._tree.heading("trim",  text="Trim")
+        self._tree.heading("ext",   text="Ext.")
         self._tree.heading("tab",   text="Tab.")
         self._tree.heading("isins", text="ISINs")
-        self._tree.column("name",  width=165, anchor="w")
-        self._tree.column("trim",  width=38,  anchor="center")
-        self._tree.column("tab",   width=38,  anchor="center")
-        self._tree.column("isins", width=38,  anchor="center")
+        self._tree.column("name",  width=145, anchor="w")
+        self._tree.column("trim",  width=34,  anchor="center")
+        self._tree.column("ext",   width=34,  anchor="center")
+        self._tree.column("tab",   width=34,  anchor="center")
+        self._tree.column("isins", width=34,  anchor="center")
 
         vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=vsb.set)
@@ -633,14 +1013,16 @@ class PdfTrimWindow(tk.Toplevel):
                             tables_file.read_text(encoding="utf-8"))))
                     except Exception:
                         pass
+                has_ext = pdf.with_suffix(".extracted.json").exists()
                 isins = self._isin_map.get(pdf.name, [])
                 self._pdf_list_data.append({
                     "path": str(pdf),
                     "name": pdf.name,
                     "trim": "✓" if has_trim else "—",
+                    "ext":  "✓" if has_ext  else "—",
                     "tab":  tab_count,
                     "isins": str(len(isins)) if isins else "—",
-                    "tag":  "trimmed" if has_trim else "plain",
+                    "tag":  "trimmed" if (has_trim or has_ext) else "plain",
                 })
         self._fill_list()
 
@@ -651,7 +1033,7 @@ class PdfTrimWindow(tk.Toplevel):
             if search and search not in item["name"].lower():
                 continue
             self._tree.insert("", "end", iid=item["path"], values=(
-                item["name"], item["trim"], item["tab"], item["isins"],
+                item["name"], item["trim"], item["ext"], item["tab"], item["isins"],
             ), tags=(item["tag"],))
 
     # ─── Auswahl ─────────────────────────────────────────────────────────────
@@ -665,8 +1047,20 @@ class PdfTrimWindow(tk.Toplevel):
         self._pending_trimmed = ""
         self._confirm_frame.pack_forget()
 
-        trimmed_file = Path(pdf_path).with_suffix(".trimmed.txt")
-        if trimmed_file.exists():
+        extracted_file = Path(pdf_path).with_suffix(".extracted.json")
+        trimmed_file   = Path(pdf_path).with_suffix(".trimmed.txt")
+        if extracted_file.exists():
+            try:
+                data = json.loads(extracted_file.read_text(encoding="utf-8"))
+                n_pf = len(data.get("portfolios") or [])
+                n_kl = sum(len(pf.get("anteilsklassen") or [])
+                           for pf in (data.get("portfolios") or []))
+                preview = (f"[Extracted JSON — {n_pf} Portfolio(s), {n_kl} Anteilsklasse(n)]\n\n"
+                           + json.dumps(data, ensure_ascii=False, indent=2))
+                self._set_preview(preview)
+            except Exception:
+                self._set_preview("[Extracted JSON — Lesefehler]")
+        elif trimmed_file.exists():
             text = trimmed_file.read_text(encoding="utf-8")
             self._set_preview(f"[Trimmed-Text — {len(text):,} Zeichen]\n\n{text}")
         else:
@@ -735,6 +1129,8 @@ class PdfTrimWindow(tk.Toplevel):
                 if self._selected_pdf == str(pdf):
                     self._on_select()
 
+        menu.add_command(label="Extracted löschen (.extracted.json)",
+                         command=lambda: _del(".extracted.json"))
         menu.add_command(label="Trimmed löschen (.trimmed.txt)",
                          command=lambda: _del(".trimmed.txt"))
         menu.add_command(label="Tabellen löschen (.tables.json)",
@@ -840,6 +1236,37 @@ class PdfTrimWindow(tk.Toplevel):
         self._worker.start()
         self._set_running(True)
 
+    def _start_extract_worker(self):
+        if not self._selected_pdf:
+            messagebox.showwarning("Kein PDF", "Bitte zuerst ein PDF auswählen.",
+                                   parent=self)
+            return
+        if self._worker and self._worker.is_alive():
+            return
+
+        provider = self._provider_var.get()
+        _key_env = {"gemini": "GOOGLE_API_KEY", "openrouter": "OPENROUTER_API_KEY"}.get(
+            provider, "ANTHROPIC_API_KEY"
+        )
+        api_key = os.getenv(_key_env, "")
+        if not api_key:
+            messagebox.showerror("API-Key fehlt",
+                                 f"Kein {_key_env} in .env gefunden.",
+                                 parent=self)
+            return
+
+        self._set_preview("[Extraktion läuft …]")
+        self._event_queue = queue.Queue()
+        self._worker = _ExtractWorker(
+            pdf_path=self._selected_pdf,
+            model=self._model_var.get(),
+            api_key=api_key,
+            result_queue=self._event_queue,
+            provider=provider,
+        )
+        self._worker.start()
+        self._set_running(True)
+
     def _stop_worker(self):
         if self._worker:
             self._worker.stop()
@@ -847,6 +1274,7 @@ class PdfTrimWindow(tk.Toplevel):
     def _set_running(self, running: bool):
         state = "disabled" if running else "normal"
         self._btn_run.config(state=state)
+        self._btn_extract.config(state=state)
         self._btn_batch.config(state=state)
         self._btn_stop.config(state="normal" if running else "disabled")
         if hasattr(self.master, "notify_process"):
@@ -867,6 +1295,8 @@ class PdfTrimWindow(tk.Toplevel):
                     self._refresh_list()
                 elif evt_type == "trimmed":
                     self._handle_trimmed(payload)
+                elif evt_type == "extracted":
+                    self._on_select()   # Vorschau aus frisch gespeicherter .extracted.json laden
                 elif evt_type == "done":
                     self._set_running(False)
                     self._refresh_list()

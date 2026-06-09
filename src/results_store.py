@@ -501,6 +501,42 @@ def update_prospekt(isin: str, prospekt_pfad: str, prospekt_url: str):
         )
 
 
+def get_wrong_prospekt_links() -> dict[str, list[str]]:
+    """
+    Findet PDFs die von ISINs aus verschiedenen Fondsfamilien (fondsname) geteilt werden.
+    Ursache: Dateinamen-Kollision beim Download (subfonds-Name-Truncation).
+    Returns: {prospekt_pfad: [isin1, isin2, ...]} — nur falsch verknüpfte PDFs.
+    """
+    with _connect() as con:
+        rows = con.execute("""
+            SELECT prospekt_pfad,
+                   GROUP_CONCAT(isin) AS isins,
+                   COUNT(DISTINCT fondsname) AS n_families
+            FROM fund_results
+            WHERE prospekt_pfad IS NOT NULL AND prospekt_pfad != ''
+              AND fondsname  IS NOT NULL AND fondsname  != ''
+            GROUP BY prospekt_pfad
+            HAVING n_families > 1
+        """).fetchall()
+    result: dict[str, list[str]] = {}
+    for r in rows:
+        result[r["prospekt_pfad"]] = (r["isins"] or "").split(",")
+    return result
+
+
+def clear_prospekt_pfad_bulk(isins: list[str]) -> int:
+    """Löscht prospekt_pfad für eine Liste von ISINs (für anschliessenden Re-Download)."""
+    if not isins:
+        return 0
+    with _connect() as con:
+        placeholders = ",".join("?" * len(isins))
+        cur = con.execute(
+            f"UPDATE fund_results SET prospekt_pfad = '' WHERE isin IN ({placeholders})",
+            isins,
+        )
+        return cur.rowcount
+
+
 def get_result(isin: str) -> Optional[dict]:
     """Gibt einen einzelnen DB-Eintrag anhand der ISIN zurück."""
     init_db()

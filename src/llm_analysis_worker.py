@@ -25,7 +25,7 @@ from pdf_analyzer import extract_relevant_text
 from utils import logger
 
 
-_RATE_LIMIT_WAIT_SEC  = 2 * 3600   # 2 Stunden warten bei Rate Limit
+_RATE_LIMIT_WAIT_SEC  = 70          # 70s warten bei Rate Limit (Tokens/Minute-Fenster)
 _RATE_LIMIT_MAX_RETRIES = 6
 _MAX_PDF_SIZE_MB = 30              # PDFs über diesem Limit werden übersprungen
 
@@ -150,12 +150,12 @@ class LLMAnalysisWorker(threading.Thread):
         try:
             response = client.messages.create(
                 model=self._model,
-                max_tokens=2048,
+                max_tokens=8192,
                 system=[{"type": "text", "text": prompt,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": [
                     {"type": "text",
-                     "text": f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
+                     "text": f"### PROSPEKT-AUSZUG:\n\n{pdf_text}",
                      "cache_control": {"type": "ephemeral"}},
                 ]}],
             )
@@ -189,7 +189,7 @@ class LLMAnalysisWorker(threading.Thread):
         try:
             response = client.models.generate_content(
                 model=self._model,
-                contents=f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}",
+                contents=f"### PROSPEKT-AUSZUG:\n\n{pdf_text}",
                 config=types.GenerateContentConfig(
                     system_instruction=prompt,
                     max_output_tokens=8192,
@@ -219,7 +219,7 @@ class LLMAnalysisWorker(threading.Thread):
                 max_tokens=8192,
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user",   "content": f"### PROSPEKT-AUSZUG:\n\n{pdf_text[:80_000]}"},
+                    {"role": "user",   "content": f"### PROSPEKT-AUSZUG:\n\n{pdf_text}"},
                 ],
             )
         except Exception as exc:
@@ -395,25 +395,30 @@ class LLMAnalysisWorker(threading.Thread):
                        total=total)
             return
 
-        size_mb = Path(pdf_path).stat().st_size / 1_048_576
-        if size_mb > _MAX_PDF_SIZE_MB:
+        pdf = Path(pdf_path)
+        has_extracted = pdf.with_suffix(".extracted.json").exists()
+        has_trimmed   = pdf.with_suffix(".trimmed.txt").exists()
+
+        # Größencheck nur wenn kein vorverarbeitetes File vorhanden
+        size_mb = pdf.stat().st_size / 1_048_576
+        if size_mb > _MAX_PDF_SIZE_MB and not has_extracted and not has_trimmed:
             with self._lock:
                 self._skipped += 1
             self._emit("log", isin=ref_isin,
-                       message=f"PDF zu groß ({size_mb:.1f} MB > {_MAX_PDF_SIZE_MB} MB) — übersprungen ({ref_name})",
+                       message=(f"PDF zu groß ({size_mb:.1f} MB) und kein extracted.json/"
+                                f"trimmed.txt — bitte zuerst Extrahieren ({ref_name})"),
                        total=total)
             return
 
-        # Große PDFs ohne .trimmed.txt ablehnen — Analyse wäre unvollständig
-        trimmed_path = Path(pdf_path).with_suffix(".trimmed.txt")
-        if not trimmed_path.exists():
+        # Seitencheck nur wenn kein vorverarbeitetes File vorhanden
+        if not has_extracted and not has_trimmed:
             pages = pdf_analyzer.get_pdf_metadata(pdf_path).get("pages", 0)
             if pages > pdf_analyzer._MAX_PAGES:
                 with self._lock:
                     self._skipped += 1
                 self._emit("log", isin=ref_isin,
                            message=(
-                               f"PDF hat {pages} Seiten — bitte zuerst PDF-Kürzer verwenden, "
+                               f"PDF hat {pages} Seiten — bitte zuerst 🔍 Extrahieren verwenden, "
                                f"dann erneut analysieren ({ref_name})"
                            ),
                            total=total)

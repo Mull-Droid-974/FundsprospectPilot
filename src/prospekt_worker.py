@@ -307,7 +307,9 @@ class ProspektWorker(threading.Thread):
 
         subfonds_name = next(
             (r.get("subfonds_name", "") for r in group_rows if r.get("subfonds_name")), "")
-        short_name = subfonds_name.split(" - ")[-1][:30] if subfonds_name else group_key[:8]
+        # Vollständiger Name + subfonds_id-Präfix verhindert Dateinamen-Kollisionen
+        # zwischen verschiedenen Fondsfamilien mit gleichem Kategorie-Suffix.
+        short_name = f"{subfonds_name[:45]}_{group_key[:8]}" if subfonds_name else group_key[:8]
 
         pdf_path = None
         try:

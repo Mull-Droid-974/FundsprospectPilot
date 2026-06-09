@@ -54,10 +54,11 @@ def _try_ocr(pdf_path: Path, image_pages: list[int]) -> Optional[str]:
         return None
 
 
-def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
+def extract_text_from_pdf(pdf_path: str, max_pages: int | None = _MAX_PAGES) -> Optional[str]:
     """
     Extrahiert den vollständigen Text aus einer PDF-Datei.
     Versucht OCR für Bild-Seiten wenn pytesseract + pdf2image installiert sind.
+    max_pages=None liest alle Seiten ohne Limit (für den Trim-Schritt).
     """
     if pdfplumber is None:
         raise ImportError("pdfplumber ist nicht installiert. Bitte 'pip install pdfplumber' ausführen.")
@@ -74,12 +75,13 @@ def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
         with pdfplumber.open(str(pdf_path)) as pdf:
             total_pages = len(pdf.pages)
             logger.info(f"PDF geöffnet: {pdf_path.name} ({total_pages} Seiten)")
-            if total_pages > _MAX_PAGES:
+            pages_to_read = pdf.pages if max_pages is None else pdf.pages[:max_pages]
+            if max_pages is not None and total_pages > max_pages:
                 logger.warning(
-                    f"PDF hat {total_pages} Seiten — nur erste {_MAX_PAGES} werden verarbeitet: {pdf_path.name}"
+                    f"PDF hat {total_pages} Seiten — nur erste {max_pages} werden verarbeitet: {pdf_path.name}"
                 )
 
-            for i, page in enumerate(pdf.pages[:_MAX_PAGES]):
+            for i, page in enumerate(pages_to_read):
                 try:
                     page_text = page.extract_text()
                     if page_text and page_text.strip():
@@ -114,12 +116,72 @@ def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
         return None
 
 
+def format_extracted_json_for_prompt(data: dict) -> str:
+    """Formatiert ein .extracted.json als lesbaren Text für den Analyse-LLM."""
+    lines = []
+
+    umbrella = data.get("umbrella") or {}
+    if any(umbrella.values()):
+        lines.append("=== UMBRELLA ===")
+        for label, key in [
+            ("Name",                    "name"),
+            ("Rechtsform",              "rechtsform"),
+            ("Domizil",                 "domizil"),
+            ("Regulierung",             "regulierung"),
+            ("Verwaltungsgesellschaft", "verwaltungsgesellschaft"),
+            ("Allg. Anleger-Beschränkung", "allg_anleger_beschraenkung"),
+        ]:
+            if umbrella.get(key):
+                lines.append(f"{label}: {umbrella[key]}")
+        lines.append("")
+
+    for pf in (data.get("portfolios") or []):
+        lines.append(f"=== PORTFOLIO: {pf.get('name', '—')} ===")
+        for label, key in [
+            ("Fondstyp",           "fondstyp"),
+            ("Anlageziel",         "anlageziel_kurz"),
+            ("Anleger-Beschränkung", "anleger_beschraenkung"),
+            ("MiFID-Kategorie",    "mifid_kategorie"),
+        ]:
+            if pf.get(key):
+                lines.append(f"{label}: {pf[key]}")
+
+        klassen = pf.get("anteilsklassen") or []
+        if klassen:
+            lines.append("ANTEILSKLASSEN:")
+            for kl in klassen:
+                parts = []
+                if kl.get("isin"):                    parts.append(f"ISIN: {kl['isin']}")
+                if kl.get("klasse_name"):             parts.append(f"Klasse: {kl['klasse_name']}")
+                if kl.get("waehrung"):                parts.append(f"Währung: {kl['waehrung']}")
+                if kl.get("mindestanlage"):           parts.append(f"Mindestanlage: {kl['mindestanlage']}")
+                if kl.get("anlegertyp_beschraenkung"):parts.append(f"Anleger: {kl['anlegertyp_beschraenkung']}")
+                if kl.get("ter"):                     parts.append(f"TER: {kl['ter']}")
+                if kl.get("ausschuettung"):           parts.append(f"Ausschüttung: {kl['ausschuettung']}")
+                vl = kl.get("vertrieb_laender")
+                if vl:                                parts.append(f"Vertrieb: {', '.join(vl)}")
+                lines.append("  - " + " | ".join(parts))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def extract_relevant_text(pdf_path: str) -> Optional[str]:
     """
     Gibt den für die Klassifizierung relevanten Text zurück.
-    Bevorzugt eine .trimmed.txt Companion-Datei falls vorhanden,
-    fällt sonst auf keyword-gefilterte PDF-Extraktion zurück.
+    Priorität: .extracted.json > .trimmed.txt > keyword-gefilterte PDF-Extraktion.
     """
+    extracted = Path(pdf_path).with_suffix(".extracted.json")
+    if extracted.exists():
+        try:
+            import json as _json
+            data = _json.loads(extracted.read_text(encoding="utf-8"))
+            text = format_extracted_json_for_prompt(data)
+            logger.info(f"Extracted-JSON verwendet: {extracted.name} ({len(text):,} Zeichen)")
+            return text
+        except Exception as e:
+            logger.warning(f"Fehler beim Lesen von {extracted.name}: {e} — fallback auf trimmed.txt")
+
     trimmed = Path(pdf_path).with_suffix(".trimmed.txt")
     if trimmed.exists():
         text = trimmed.read_text(encoding="utf-8")
@@ -135,10 +197,11 @@ def extract_relevant_text(pdf_path: str) -> Optional[str]:
     return relevant
 
 
-def extract_tables_from_pdf(pdf_path: str) -> list[dict]:
+def extract_tables_from_pdf(pdf_path: str, max_pages: int | None = _MAX_PAGES) -> list[dict]:
     """
     Extrahiert alle Tabellen aus der PDF als strukturierte Liste.
     Jede Tabelle: {"page": int, "headers": [...], "rows": [[...], ...]}.
+    max_pages=None liest alle Seiten ohne Limit (für den Trim-Schritt).
     """
     if pdfplumber is None:
         return []
@@ -146,7 +209,8 @@ def extract_tables_from_pdf(pdf_path: str) -> list[dict]:
     tables = []
     try:
         with pdfplumber.open(str(pdf_path)) as pdf:
-            for page_num, page in enumerate(pdf.pages[:_MAX_PAGES], 1):
+            pages_to_read = pdf.pages if max_pages is None else pdf.pages[:max_pages]
+            for page_num, page in enumerate(pages_to_read, 1):
                 for raw in page.extract_tables() or []:
                     if not raw or len(raw) < 2:
                         continue

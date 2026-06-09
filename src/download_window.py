@@ -99,6 +99,15 @@ class DownloadWindow(tk.Toplevel):
             font=("Segoe UI", 9), cursor="hand2",
         ).pack(side="right", padx=(12, 4))
 
+        self.btn_audit = tk.Button(
+            inner, text="⚠  Audit & Reparieren",
+            command=self._run_audit_repair,
+            bg="#2e1a00", fg=ACCENT_YELLOW, relief="flat",
+            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE
+        )
+        self.btn_audit.pack(side="right", padx=(4, 0))
+
         self.btn_batch = tk.Button(
             inner, text="📥  Alle fehlenden downloaden",
             command=self._start_batch,
@@ -465,6 +474,41 @@ class DownloadWindow(tk.Toplevel):
         self._prog_var.set(0)
         self._log_line(f"Starte Download für {len(rows)} ISIN(s) …")
 
+    def _run_audit_repair(self):
+        """Findet falsch verknüpfte PDFs (Dateinamen-Kollision) und bereinigt sie."""
+        self._log_line("Audit läuft …")
+        wrong = results_store.get_wrong_prospekt_links()
+        if not wrong:
+            messagebox.showinfo(
+                "Audit abgeschlossen",
+                "Keine falsch verknüpften PDFs gefunden.",
+                parent=self,
+            )
+            self._log_line("Audit: keine Fehler gefunden.")
+            return
+
+        all_isins = [isin for isins in wrong.values() for isin in isins]
+        n_pdfs  = len(wrong)
+        n_isins = len(all_isins)
+
+        if not messagebox.askyesno(
+            "Falsch verknüpfte PDFs gefunden",
+            f"{n_pdfs} PDF(s) sind mit ISINs aus verschiedenen Fondsfamilien verknüpft.\n"
+            f"Betroffen: {n_isins} ISINs.\n\n"
+            f"Diese ISINs werden bereinigt (prospekt_pfad geleert),\n"
+            f"damit sie beim nächsten Download das korrekte PDF erhalten.\n\n"
+            f"Jetzt bereinigen?",
+            parent=self,
+        ):
+            return
+
+        cleared = results_store.clear_prospekt_pfad_bulk(all_isins)
+        self._log_line(
+            f"Bereinigt: {cleared} ISINs aus {n_pdfs} falsch verknüpften PDFs. "
+            f"Bitte Re-Download starten."
+        )
+        self._refresh_table()
+
     def _stop_worker(self):
         if self._worker:
             self._worker.stop()
@@ -475,6 +519,7 @@ class DownloadWindow(tk.Toplevel):
         self.btn_batch.config(state=state_on)
         self.btn_phase2.config(state=state_on)
         self.btn_sel.config(state=state_on)
+        self.btn_audit.config(state=state_on)
         self.btn_stop.config(state=state_off)
         if hasattr(self.master, "notify_process"):
             self.master.notify_process("Download", running)
