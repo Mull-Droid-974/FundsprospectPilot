@@ -104,6 +104,10 @@ def init_db():
             "mindestanlage TEXT DEFAULT ''",
             "mindestanlage_roh TEXT DEFAULT ''",
             "prospekt_nicht_gefunden TEXT DEFAULT ''",
+            "dienstleistung TEXT DEFAULT ''",
+            "dienstleistung_roh TEXT DEFAULT ''",
+            "vertriebskanal TEXT DEFAULT ''",
+            "vertriebskanal_roh TEXT DEFAULT ''",
         ]:
             try:
                 con.execute(f"ALTER TABLE fund_results ADD COLUMN {col_def}")
@@ -667,6 +671,10 @@ def update_llm_analysis(
     kundentyp_roh: str = "",
     mindestanlage: str = "",
     mindestanlage_roh: str = "",
+    dienstleistung: str = "",
+    dienstleistung_roh: str = "",
+    vertriebskanal: str = "",
+    vertriebskanal_roh: str = "",
     modell: str = "",
 ):
     """Speichert LLM-Analyseergebnisse für eine ISIN. Überschreibt immer."""
@@ -686,6 +694,10 @@ def update_llm_analysis(
                 kundentyp_roh                 = ?,
                 mindestanlage                 = ?,
                 mindestanlage_roh             = ?,
+                dienstleistung                = ?,
+                dienstleistung_roh            = ?,
+                vertriebskanal                = ?,
+                vertriebskanal_roh            = ?,
                 modell                        = ?,
                 analysiert_am                 = ?
             WHERE isin = ?
@@ -694,6 +706,8 @@ def update_llm_analysis(
             llm_segmentierung or "", llm_segmentierung_begruendung or "",
             fondstyp_roh or "", anlegertyp_roh or "", kundentyp_roh or "",
             mindestanlage or "", mindestanlage_roh or "",
+            dienstleistung or "", dienstleistung_roh or "",
+            vertriebskanal or "", vertriebskanal_roh or "",
             modell or "", now, isin,
         ))
 
@@ -706,13 +720,36 @@ def reset_llm_analysis(isins: list[str]) -> int:
         con.executemany("""
             UPDATE fund_results SET
                 fondstyp = '', anlegertyp = '', kundentyp = '',
+                dienstleistung = '', vertriebskanal = '',
                 llm_segmentierung = '', llm_segmentierung_begruendung = '',
                 fondstyp_roh = '', anlegertyp_roh = '', kundentyp_roh = '',
+                dienstleistung_roh = '', vertriebskanal_roh = '',
                 mindestanlage = '', mindestanlage_roh = '',
-                modell = '', analysiert_am = ''
+                segmentierung = '', konfidenz = '', modell = '', analysiert_am = ''
             WHERE isin = ?
         """, [(isin,) for isin in isins])
     return len(isins)
+
+
+def reset_all_analysis_fields() -> int:
+    """
+    Bereinigt ALLE Analyseergebnisse in der gesamten Datenbank für LLM-Neuanalyse.
+    Behält: prospekt_pfad, prospekt_url, ms_*, fundinfo_*, und alle anderen APIs intakt.
+    Setzt auf leeren String: Klassifizierungen, Rohwerte, LLM-Metadaten, Analysezeiten.
+    """
+    with _connect() as con:
+        con.execute("""
+            UPDATE fund_results SET
+                fondstyp = '', anlegertyp = '', kundentyp = '',
+                dienstleistung = '', vertriebskanal = '',
+                llm_segmentierung = '', llm_segmentierung_begruendung = '',
+                fondstyp_roh = '', anlegertyp_roh = '', kundentyp_roh = '',
+                dienstleistung_roh = '', vertriebskanal_roh = '',
+                mindestanlage = '', mindestanlage_roh = '',
+                segmentierung = '', konfidenz = '', modell = '', analysiert_am = ''
+        """)
+        n = con.total_changes
+    return n
 
 
 def delete_all_results() -> int:

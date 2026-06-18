@@ -32,6 +32,8 @@ _COLS = [
     ("fondstyp",      "Fondstyp",      100),
     ("anlegertyp",    "Anlegertyp",    160),
     ("kundentyp",      "Kundentyp",     150),
+    ("dienstleistung", "Dienstleistung", 120),
+    ("vertriebskanal", "Vertriebskanal", 130),
     ("mindestanlage",  "Mindestanlage", 130),
     ("segmentierung",  "Segmentierung", 110),
     ("konfidenz",     "Konfidenz",      80),
@@ -53,6 +55,8 @@ _COLS = [
     ("fondstyp_roh",                  "Fondstyp (Roh)",    180),
     ("anlegertyp_roh",                "Anlegertyp (Roh)",  180),
     ("kundentyp_roh",                 "Kundentyp (Roh)",   180),
+    ("dienstleistung_roh",            "Dienstleistung (Roh)", 200),
+    ("vertriebskanal_roh",            "Vertriebskanal (Roh)",  200),
 ]
 _COL_KEYS = [c[0] for c in _COLS]
 
@@ -355,6 +359,7 @@ class ResultsWindow(tk.Toplevel):
             ("Identifikation", ["isin", "fondsname", "subfonds_name", "anteilsklasse",
                                 "ausschuettungsart", "fondswaehrung"]),
             ("Analyse", ["segmentierung", "fondstyp", "anlegertyp", "kundentyp",
+                         "dienstleistung", "vertriebskanal",
                          "mindestanlage", "konfidenz", "analysiert_am"]),
             ("LLM-Segmentierung", ["llm_segmentierung", "llm_segmentierung_begruendung"]),
             ("Fundinfo API", ["fundinfo_ter", "fundinfo_investor_type", "umbrella_id",
@@ -376,6 +381,8 @@ class ResultsWindow(tk.Toplevel):
             "fondstyp":      "fondstyp_roh",
             "anlegertyp":    "anlegertyp_roh",
             "kundentyp":     "kundentyp_roh",
+            "dienstleistung": "dienstleistung_roh",
+            "vertriebskanal": "vertriebskanal_roh",
             "mindestanlage": "mindestanlage_roh",
         }
 

@@ -253,6 +253,12 @@ class AdminPanel(tk.Toplevel):
         self._ms_pw_status.pack(side="left", padx=(10, 0))
 
     def _build_tab_system(self, parent):
+        # LLM-Provider Auswahl
+        provider_frame = self._section(parent, "LLM-Provider (Default)")
+        self.var_llm_provider = tk.StringVar()
+        self._combo(provider_frame, "Provider:", self.var_llm_provider,
+                   ["anthropic", "gemini", "openrouter"], 0)
+
         proc_frame = self._section(parent, "Verarbeitungs-Einstellungen")
         self.var_batch_size = tk.StringVar()
         self.var_delay = tk.StringVar()
@@ -290,6 +296,58 @@ class AdminPanel(tk.Toplevel):
 
     # ─── Haupt-UI ─────────────────────────────────────────────────────────────
 
+    def _build_tab_database(self, parent):
+        """Datenbank-Operationen: Cleanup für Neuanalyse."""
+        frame = self._section(parent, "Datenbank-Wartung")
+
+        info_text = tk.Label(
+            frame, text=(
+                "Analyse-Felder zurücksetzen für vollständige LLM-Neuanalyse\n\n"
+                "Löscht: fondstyp, anlegertyp, kundentyp, dienstleistung,\n"
+                "vertriebskanal + Rohwerte + LLM-Metadaten\n\n"
+                "Behält: Prospekt-URLs/Pfade, Morningstar-Daten, APIs"
+            ),
+            bg=BG_PANEL, fg=FG_MUTED,
+            font=("Segoe UI", 8), justify="left", wraplength=450,
+            padx=12, pady=10
+        )
+        info_text.pack(fill="x")
+
+        tk.Button(
+            frame, text="Analyse-Felder zurücksetzen",
+            command=self._reset_analysis,
+            bg=ACCENT_RED, fg=FG_TEXT, relief="flat",
+            font=("Segoe UI", 10, "bold"), padx=12, pady=8, cursor="hand2"
+        ).pack(pady=(10, 12))
+
+    def _reset_analysis(self):
+        """Zeige Bestätigungsdialog und führe Cleanup aus."""
+        if not messagebox.askyesno(
+            "Analyse zurücksetzen?",
+            "Dies loescht ALLE Klassifizierungsfelder fuer alle ISINs:\n\n"
+            "- fondstyp, anlegertyp, kundentyp\n"
+            "- dienstleistung, vertriebskanal\n"
+            "- LLM-Metadaten (segmentierung, konfidenz, modell)\n"
+            "- alle Rohwerte und Analysedaten\n\n"
+            "Prospekt-URLs, Morningstar-Daten bleiben erhalten.\n\n"
+            "NICHT RUECKGAENGIG MACHBAR!\n\n"
+            "Fortfahren?",
+            parent=self,
+        ):
+            return
+
+        try:
+            import results_store
+            num_records = results_store.reset_all_analysis_fields()
+            messagebox.showinfo(
+                "Erfolgreich",
+                f"Datenbank bereinigt.\n{num_records} Eintraege zurueckgesetzt.\n\n"
+                "Bereit fuer neue LLM-Analyse.",
+                parent=self,
+            )
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Cleanup fehlgeschlagen:\n{str(e)}", parent=self)
+
     def _build_ui(self):
         style = ttk.Style(self)
         style.theme_use("clam")
@@ -311,6 +369,7 @@ class AdminPanel(tk.Toplevel):
             ("🌐  OpenRouter",  self._build_tab_openrouter),
             ("🌟  Morningstar", self._build_tab_morningstar),
             ("⚙  System",      self._build_tab_system),
+            ("🗄  Datenbank",   self._build_tab_database),
         ]
         for label, builder in tabs:
             tab = tk.Frame(nb, bg=BG_MAIN)
@@ -353,6 +412,7 @@ class AdminPanel(tk.Toplevel):
     def _load(self):
         self.var_excel.set(os.getenv("EXCEL_PATH", "data/input/fonds_universe.xlsx"))
         self.var_pdf_folder.set(os.getenv("PDF_FOLDER", "data/prospectus"))
+        self.var_llm_provider.set(os.getenv("LLM_PROVIDER", "anthropic"))
         self.var_key.set(os.getenv("ANTHROPIC_API_KEY", ""))
         self.var_batch_model.set(os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001"))
         self.var_single_model.set(os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6"))
@@ -579,6 +639,12 @@ class AdminPanel(tk.Toplevel):
         env_path = Path(".env")
         if not env_path.exists():
             env_path.write_text("")
+
+        # LLM-Provider speichern
+        provider = self.var_llm_provider.get().strip()
+        if provider:
+            set_key(".env", "LLM_PROVIDER", provider)
+            os.environ["LLM_PROVIDER"] = provider
 
         excel = self.var_excel.get().strip()
         if excel:

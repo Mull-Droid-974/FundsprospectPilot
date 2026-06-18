@@ -166,10 +166,11 @@ def format_extracted_json_for_prompt(data: dict) -> str:
     return "\n".join(lines)
 
 
-def extract_relevant_text(pdf_path: str) -> Optional[str]:
+def extract_relevant_text(pdf_path: str) -> tuple[Optional[str], bool]:
     """
-    Gibt den für die Klassifizierung relevanten Text zurück.
+    Gibt (text, used_extracted: bool) zurück.
     Priorität: .extracted.json > .trimmed.txt > keyword-gefilterte PDF-Extraktion.
+    used_extracted=True wenn .extracted.json genutzt wurde (→ Tables überspringen).
     """
     extracted = Path(pdf_path).with_suffix(".extracted.json")
     if extracted.exists():
@@ -178,7 +179,7 @@ def extract_relevant_text(pdf_path: str) -> Optional[str]:
             data = _json.loads(extracted.read_text(encoding="utf-8"))
             text = format_extracted_json_for_prompt(data)
             logger.info(f"Extracted-JSON verwendet: {extracted.name} ({len(text):,} Zeichen)")
-            return text
+            return text, True
         except Exception as e:
             logger.warning(f"Fehler beim Lesen von {extracted.name}: {e} — fallback auf trimmed.txt")
 
@@ -186,15 +187,15 @@ def extract_relevant_text(pdf_path: str) -> Optional[str]:
     if trimmed.exists():
         text = trimmed.read_text(encoding="utf-8")
         logger.info(f"Trimmed-Text verwendet: {trimmed.name} ({len(text):,} Zeichen)")
-        return text
+        return text, False
 
     full_text = extract_text_from_pdf(pdf_path)
     if not full_text:
-        return None
+        return None, False
 
     relevant = extract_relevant_sections(full_text)
     logger.info(f"Relevanter Textausschnitt: {len(relevant):,} Zeichen")
-    return relevant
+    return relevant, False
 
 
 def extract_tables_from_pdf(pdf_path: str, max_pages: int | None = _MAX_PAGES) -> list[dict]:

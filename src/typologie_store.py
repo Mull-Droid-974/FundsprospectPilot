@@ -36,9 +36,7 @@ _SEED: list[tuple] = [
     ("kundentyp", "Öffentlich-rechtliche Körperschaften mit professioneller Tresorie",
                                                                                  "institutional", "public law entities, government treasury, Körperschaften öffentlichen Rechts", 7),
     ("kundentyp", "Grossanleger",                                                "institutional", "large investors, wholesale investors", 8),
-    ("kundentyp", "Captive Channel",                                             "institutional", "captive distribution, group internal channel", 9),
     ("kundentyp", "Family Offices",                                              "institutional", "family office, wealth management family", 10),
-    ("kundentyp", "Finanzintermediäre",                                          "institutional", "financial intermediaries, distributors, Vertriebspartner, banks distributing", 11),
     ("kundentyp", "Anleger mit individuellen Gebührenvereinbarungen",            "institutional", "bespoke fee, individual fee agreement, fee-based", 12),
     ("kundentyp", "Kunden mit professionellem Vermögensverwaltungsvertrag",      "institutional", "discretionary mandate, DPM, portfolio management agreement", 13),
     ("kundentyp", "Kunden mit unabhängigem Beratungsvertrag mit einem Finanzintermediär",
@@ -51,6 +49,16 @@ _SEED: list[tuple] = [
     ("kundentyp", "Mindestanlage (retail)",                                      "retail",        "low minimum investment, retail minimum, kleines Mindestinvestment", 20),
     ("kundentyp", "Mindestanlage (institutionell)",                              "institutional", "high minimum investment, large minimum, hohes Mindestinvestment", 21),
     ("kundentyp", "Eigene / Ehemalige Mitarbeiter",                             "institutional", "own employees, former employees, Mitarbeiter, ehemalige Mitarbeiter, staff fund, employee fund, Mitarbeiterfonds", 22),
+
+    # ── Dienstleistung ───────────────────────────────────────────────────────────
+    ("dienstleistung", "Delegation",     "", "discretionary mandate, DPM, Verwaltungsmandat, portfolio management", 1),
+    ("dienstleistung", "Execution only", "", "execution only, pure execution, keine Beratung, kein Mandat",         2),
+    ("dienstleistung", "Beratung",       "", "advisory, investment advice, Anlageberatung, advisory mandate",       3),
+
+    # ── Vertriebskanal ───────────────────────────────────────────────────────────
+    ("vertriebskanal", "Captive Channel",    "institutional", "captive distribution, group internal channel, hausinterner Vertrieb", 1),
+    ("vertriebskanal", "Finanzintermediäre", "institutional", "financial intermediaries, distributors, Vertriebspartner, banks distributing", 2),
+    ("vertriebskanal", "Vermittler",         "",              "broker, agent, tied agent, Vermittler, Finanzberater", 3),
 ]
 
 
@@ -79,6 +87,9 @@ def init_typologie_db():
             "INSERT OR IGNORE INTO typologie (feld, wert, segment, synonyme, sortierung) VALUES (?,?,?,?,?)",
             _SEED,
         )
+        # Migration: Captive Channel + Finanzintermediäre aus Kundentyp entfernen (→ Vertriebskanal)
+        for wert in ("Captive Channel", "Finanzintermediäre"):
+            con.execute("DELETE FROM typologie WHERE feld='kundentyp' AND wert=?", (wert,))
 
 
 def get_alle_werte() -> list[dict]:

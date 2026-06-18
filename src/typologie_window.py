@@ -24,9 +24,11 @@ BTN_BG          = "#45475a"
 BTN_ACTIVE      = "#585b70"
 
 _FELDER = [
-    ("fondstyp",   "Fondstyp"),
-    ("anlegertyp", "Anlegertyp"),
-    ("kundentyp",  "Kundentyp"),
+    ("fondstyp",       "Fondstyp"),
+    ("anlegertyp",     "Anlegertyp"),
+    ("kundentyp",      "Kundentyp"),
+    ("dienstleistung", "Dienstleistung"),
+    ("vertriebskanal", "Vertriebskanal"),
 ]
 
 _SEGMENT_OPTS = ["retail", "institutional", ""]
@@ -42,9 +44,9 @@ class TypologieWindow(tk.Toplevel):
 
     def __init__(self, parent: tk.Widget):
         super().__init__(parent)
-        self.title("Werte-Verwaltung — Fondstyp / Anlegertyp / Kundentyp")
+        self.title("Werte-Verwaltung — Fondstyp / Anlegertyp / Kundentyp / Dienstleistung / Vertriebskanal")
         self.configure(bg=BG_MAIN)
-        self.geometry("800x560")
+        self.geometry("900x560")
         self.minsize(650, 400)
         self.transient(parent)
 

@@ -83,7 +83,7 @@ def process_single_pdf(
             log_callback(msg)
 
     _log(f"Analysiere PDF: {pdf_path}")
-    text = extract_relevant_text(pdf_path)
+    text, _ = extract_relevant_text(pdf_path)
 
     if not text:
         return {
@@ -195,7 +195,7 @@ class BatchProcessor:
 
             if pdf_path:
                 try:
-                    text = extract_relevant_text(pdf_path)
+                    text, _ = extract_relevant_text(pdf_path)
                     if text:
                         result = classify_prospectus(
                             text, isin=isin, fund_name=fund_name, api_key=config.api_key

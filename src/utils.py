@@ -114,7 +114,7 @@ def extract_relevant_sections(text: str) -> str:
 
 
 def validate_api_key(api_key: str) -> bool:
-    """Prüft ob ein Anthropic API-Key gültig ist."""
+    """Prüft ob ein Anthropic API-Key gültig ist (Format + Authentifizierung)."""
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -125,6 +125,11 @@ def validate_api_key(api_key: str) -> bool:
         )
         return True
     except anthropic.AuthenticationError:
+        return False
+    except anthropic.BadRequestError as exc:
+        # API-Limit erreicht = Key ist gültig, nur Budget aufgebraucht
+        if "usage" in str(exc).lower() or "limit" in str(exc).lower():
+            return True
         return False
     except Exception:
         return False
