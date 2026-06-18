@@ -33,8 +33,12 @@ def _mapping_path(batch_id: str) -> Path:
 
 def submit_batch(groups: dict, prompt_template: str, model: str, api_key: str,
                  trim_model: str = "claude-haiku-4-5-20251001",
-                 provider: str = "anthropic", progress=None) -> str:
-    """Reicht alle Gruppen als einen Batch ein. Gibt batch_id zurück.
+                 provider: str = "anthropic", progress=None,
+                 chunk_size: int = 500) -> list[str]:
+    """Reicht alle Gruppen blockweise ein. Gibt Liste der batch_ids zurück.
+
+    Pro Block (chunk_size Gruppen) wird sofort EIN Batch eingereicht und das
+    Mapping lokal gespeichert — abbruchsicher und blockweise abholbar.
 
     groups: {group_key: [row, ...]}
     progress: optional callable(done, total, message)
@@ -43,10 +47,32 @@ def submit_batch(groups: dict, prompt_template: str, model: str, api_key: str,
         raise RuntimeError("Batch-Analyse ist nur für Anbieter 'anthropic' verfügbar.")
 
     client = anthropic.Anthropic(api_key=api_key)
-    requests = []
-    mapping: dict[str, dict] = {}
+    _BATCH_DIR.mkdir(parents=True, exist_ok=True)
+
     items = list(groups.items())
     total = len(items)
+    batch_ids: list[str] = []
+    requests: list[dict] = []
+    mapping: dict[str, dict] = {}
+
+    def _flush() -> None:
+        """Reicht die gesammelten Requests als einen Batch ein und speichert das Mapping."""
+        nonlocal requests, mapping
+        if not requests:
+            return
+        batch = client.messages.batches.create(requests=requests)
+        _mapping_path(batch.id).write_text(json.dumps({
+            "batch_id": batch.id,
+            "model": model,
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "n_requests": len(requests),
+            "items": mapping,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        batch_ids.append(batch.id)
+        if progress:
+            progress(total, total, f"✓ Block eingereicht: {batch.id} ({len(requests)} Req)")
+        requests = []
+        mapping = {}
 
     for idx, (group_key, rows) in enumerate(items, 1):
         pdf_path = next(
@@ -88,21 +114,16 @@ def submit_batch(groups: dict, prompt_template: str, model: str, api_key: str,
                      for r in rows],
         }
 
-    if not requests:
+        # Block voll → sofort einreichen
+        if len(requests) >= chunk_size:
+            _flush()
+
+    _flush()  # Rest einreichen
+
+    if not batch_ids:
         raise RuntimeError("Keine analysierbaren Gruppen (kein PDF/Text gefunden).")
 
-    batch = client.messages.batches.create(requests=requests)
-
-    _BATCH_DIR.mkdir(parents=True, exist_ok=True)
-    _mapping_path(batch.id).write_text(json.dumps({
-        "batch_id": batch.id,
-        "model": model,
-        "created": datetime.now().isoformat(timespec="seconds"),
-        "n_requests": len(requests),
-        "items": mapping,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    return batch.id
+    return batch_ids
 
 
 def poll_batch(batch_id: str, api_key: str) -> dict:
@@ -181,3 +202,39 @@ def list_local_batches() -> list[dict]:
         except Exception:
             continue
     return out
+
+
+def fetch_all_pending(api_key: str, progress=None) -> dict:
+    """Prüft alle lokal gespeicherten Batches und holt die fertigen ('ended') ab.
+    Bereits abgeholte (Marker-Datei .done) werden übersprungen.
+    Gibt {saved, errored, skipped, ended, pending} zurück."""
+    batches = list_local_batches()
+    agg = {"saved": 0, "errored": 0, "skipped": 0, "ended": 0, "pending": 0}
+
+    for b in batches:
+        bid = b["batch_id"]
+        done_marker = _BATCH_DIR / f"{bid}.done"
+        if done_marker.exists():
+            continue  # schon abgeholt
+
+        try:
+            status = poll_batch(bid, api_key)
+        except Exception as e:
+            if progress:
+                progress(f"✗ {bid}: Status-Fehler {e}")
+            continue
+
+        if status["status"] != "ended":
+            agg["pending"] += 1
+            if progress:
+                progress(f"⏳ {bid}: {status['status']} {status['counts']}")
+            continue
+
+        agg["ended"] += 1
+        res = fetch_and_store(bid, api_key, progress=progress)
+        agg["saved"]   += res["saved"]
+        agg["errored"] += res["errored"]
+        agg["skipped"] += res["skipped"]
+        done_marker.write_text("ok", encoding="utf-8")  # nicht erneut abholen
+
+    return agg
