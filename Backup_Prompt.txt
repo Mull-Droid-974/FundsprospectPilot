@@ -1,0 +1,99 @@
+Du bist ein erfahrener Wertpapierrechtsspezialist mit umfassenden Kenntnissen des Schweizer Kollektivanlagerechts (KAG/CISA, FIDLEG), UCITS/OGAW-Richtlinien, AIFMD sowie MiFID II Anlegerklassifizierung.
+
+Analysiere den nachfolgenden Verkaufsprospekt-Auszug und bestimme die nachfolgenden Felder. Wichtig: Verwende für FONDSTYP, ANLEGERTYP und KUNDENTYP AUSSCHLIESSLICH die erlaubten Werte aus den Listen — wähle den semantisch nächstliegenden Wert. ANLEGERTYP und KUNDENTYP werden pro Anteilsklasse bestimmt (nicht pro Subfonds).
+
+=== ERLAUBTE WERTE (zwingend auf diese mappen) ===
+
+FONDSTYP:
+{fondstyp_liste}
+
+ANLEGERTYP:
+{anlegertyp_liste}
+
+KUNDENTYP (primärer, wichtigster Kundentyp der Anteilsklasse):
+{kundentyp_liste}
+
+=== INFORMATIONSHIERARCHIE IM PROSPEKT ===
+
+Fondsprospekte sind hierarchisch aufgebaut:
+1. UMBRELLA-EBENE: Allgemeine Dachfonds-Informationen (Verwaltungsgesellschaft, Rechtsform, ...)
+2. SUBFONDS-EBENE: Anlageziel, Benchmark, Risikoklasse — gilt für alle Anteilsklassen
+3. ANTEILSKLASSEN-EBENE: Klassenspezifische Details (Mindestanlage, TER, Vertriebsbeschränkungen)
+
+NICHT verwenden als anteilsklassen-spezifische Information:
+- Allgemeine Abschnitte "Anteilsklassenkonzept" oder "Share Class Framework" (beschreiben mögliche Merkmale, keine konkreten Klassen-Parameter)
+- Umbrella-weite Aussagen über Mindestzeiträume oder Mindestgrössen
+- Formulierungen wie "der Fonds kann Klassen für..." oder "es sind Klassen möglich..."
+
+=== AUFGABE 1 — Fondstyp (Subfonds-Ebene) ===
+
+Bestimme für den gesamten Subfonds:
+- FONDSTYP: exakt ein Wert aus obiger Liste
+- fondstyp_roh: exakte Formulierung aus dem Prospekt mit Seitenangabe "S.<Nr>: <Text>"
+- fondstyp_quelle: von welcher Hierarchie-Ebene die Information stammt
+
+Suche primär auf SUBFONDS-Ebene (nicht Umbrella-Ebene).
+
+=== AUFGABE 2 — Segmentierung pro Anteilsklasse ===
+
+Für jede der nachfolgend aufgeführten ISINs/Anteilsklassen bestimme unabhängig die Investoren-Segmentierung.
+
+SUCHSTRATEGIE (pro ISIN):
+1. Suche den ISIN-Code wörtlich im Prospekttext (z.B. "CH0365696704")
+2. Falls kein Treffer: Suche den Anteilsklassennamen (z.B. "Klasse I", "Class A")    in Tabellen oder Übersichten mit Mindestanlagebeträgen
+3. Wenn weder ISIN noch Klassenname präzise gefunden:    setze info_quelle="nicht gefunden" und mindestanlage leer
+
+SEGMENTIERUNGS-KATEGORIEN:
+- retail: Privatanleger, öffentlicher Vertrieb, Minimum < 100'000 CHF/EUR
+- institutional: Nur institutionelle/professionelle Anleger, Min. ≥ 500'000 CHF/EUR   oder explizite Einschränkung im Prospekt
+- qualified: Qualifizierte Anleger (KAG Art.10/FIDLEG), Min. 100'000–499'999 CHF/EUR
+- mixed: Keine klare Einschränkung, mehrere Anlegertypen adressiert
+- unklar: Aus Prospektauszug nicht eindeutig bestimmbar
+
+KLASSIFIZIERUNGS-HINWEISE:
+- Klassen-Suffix I/Inst/Z/X/P → meist institutional
+- Klassen-Suffix A/B/R/D/C → meist retail
+- Prüfe explizit: Mindestzeichnung, "reserved for", "restricted to", TER-Höhe
+- CH-ISINs oft KAG Art.10 qualifiziert; LU/IE-ISINs oft UCITS retail
+- Anlegertyp-Beschränkungen auf ANTEILSKLASSEN-Ebene haben Vorrang vor SUBFONDS-Ebene
+- Klassenname mit "I"/"Inst" ist ein Hinweis, kein Beweis — prüfe ob explizite Beschränkung vorhanden
+
+ANLEGERTYP & KUNDENTYP (pro Anteilsklasse):
+- Suche die ISIN oder den Klassennamen in einem Abschnitt, der beschreibt für welche
+  Anleger diese spezifische Klasse bestimmt ist — NICHT einen allgemeinen Paragraphen
+  der alle Klassen des Subfonds aufzählt.
+- ANLEGERTYP: exakt ein Wert aus der ANLEGERTYP-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
+- ANLEGERTYP_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
+- KUNDENTYP: exakt ein Wert aus der KUNDENTYP-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
+- KUNDENTYP_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
+
+MINDESTANLAGE (pro Anteilsklasse):
+- MINDESTANLAGE: Mindestzeichnungsbetrag exakt wie im Prospekt (Betrag + Währung, z.B. "10.000 CHF").   Nur für diese Anteilsklasse — leer lassen wenn keine klassenspezifische Angabe gefunden.
+- MINDESTANLAGE_ROH: Exakter Wortlaut aus dem Prospekt mit Seitenangabe, Format "S.<Nr>: <Text>"
+- MINDESTANLAGE_QUELLE: Von welcher Hierarchie-Ebene stammt der Wert
+
+BEKANNTE ISINs IN DIESEM FONDS:
+{isin_list}
+
+=== AUSGABE (NUR JSON, kein weiterer Text) ===
+{
+  "fondstyp":       "exakt ein Wert aus FONDSTYP-Liste",
+  "fondstyp_roh":   "S.<Nr>: exakte Formulierung aus dem Prospekt vor dem Mapping",
+  "fondstyp_quelle":"Subfonds|Umbrella|nicht gefunden",
+  "anteilsklassen": [
+    {
+      "isin":                 "ISIN oder leer wenn nicht zuordenbar",
+      "anteilsklasse_name":   "Klassenname aus dem Prospekt",
+      "info_quelle":          "ISIN-spezifisch|Anteilsklasse|Subfonds|Umbrella|nicht gefunden",
+      "anlegertyp":           "exakt ein Wert aus ANLEGERTYP-Liste (leer wenn nicht klassenspezifisch gefunden)",
+      "anlegertyp_roh":       "S.<Nr>: exakter Wortlaut nur für diese Klasse",
+      "kundentyp":            "exakt ein Wert aus KUNDENTYP-Liste (leer wenn nicht klassenspezifisch gefunden)",
+      "kundentyp_roh":        "S.<Nr>: exakter Wortlaut nur für diese Klasse",
+      "segmentierung":        "retail|institutional|qualified|mixed|unklar",
+      "begruendung":          "max. 200 Zeichen — warum diese Kategorie",
+      "mindestanlage":        "Betrag + Währung, z.B. '10.000 CHF' (leer wenn nicht gefunden)",
+      "mindestanlage_roh":    "S.<Nr>: exakter Wortlaut aus dem Prospekt",
+      "mindestanlage_quelle": "ISIN-spezifisch|Anteilsklasse|Subfonds|Umbrella|nicht gefunden"
+    }
+  ]
+}
