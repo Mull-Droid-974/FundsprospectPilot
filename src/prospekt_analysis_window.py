@@ -9,9 +9,10 @@ Start per Auswahl / Doppelklick.
 import os
 import queue
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,10 +33,12 @@ ACCENT_LAVENDER = "#b4befe"
 BTN_BG          = "#45475a"
 BTN_ACTIVE      = "#585b70"
 
+# Analyse-Modelle: bewusst OHNE Haiku — der A/B-Test zeigte zu schwache
+# Klassifizierung (kundentyp/fondstyp). Haiku wird nur fürs Preprocessing (Trim)
+# verwendet. Kostenersparnis kommt aus Trim-auf-Haiku + Batch-API (−50%).
 MODELS = [
     "claude-sonnet-4-6",
     "claude-opus-4-7",
-    "claude-haiku-4-5-20251001",
 ]
 
 DEFAULT_PROMPT = """\
@@ -44,9 +47,11 @@ Schweizer Kollektivanlagerechts (KAG/CISA, FIDLEG), UCITS/OGAW-Richtlinien, AIFM
 sowie MiFID II Anlegerklassifizierung.
 
 Analysiere den nachfolgenden Verkaufsprospekt-Auszug und bestimme die nachfolgenden \
-Felder. Wichtig: Verwende für FONDSTYP, ANLEGERTYP und KUNDENTYP AUSSCHLIESSLICH \
-die erlaubten Werte aus den Listen — wähle den semantisch nächstliegenden Wert. \
-ANLEGERTYP und KUNDENTYP werden pro Anteilsklasse bestimmt (nicht pro Subfonds).
+Felder. Wichtig: Verwende für FONDSTYP, ANLEGERTYP, KUNDENTYP, DIENSTLEISTUNG und \
+VERTRIEBSKANAL AUSSCHLIESSLICH die erlaubten Werte aus den Listen — wähle den \
+semantisch nächstliegenden Wert. \
+ANLEGERTYP, KUNDENTYP, DIENSTLEISTUNG und VERTRIEBSKANAL werden pro Anteilsklasse \
+bestimmt (nicht pro Subfonds).
 
 === ERLAUBTE WERTE (zwingend auf diese mappen) ===
 
@@ -58,6 +63,12 @@ ANLEGERTYP:
 
 KUNDENTYP (primärer, wichtigster Kundentyp der Anteilsklasse):
 {kundentyp_liste}
+
+DIENSTLEISTUNG (Dienstleistungsart pro Anteilsklasse):
+{dienstleistung_liste}
+
+VERTRIEBSKANAL (primärer Vertriebskanal pro Anteilsklasse):
+{vertriebskanal_liste}
 
 === INFORMATIONSHIERARCHIE IM PROSPEKT ===
 
@@ -118,6 +129,31 @@ ANLEGERTYP & KUNDENTYP (pro Anteilsklasse):
 - KUNDENTYP: exakt ein Wert aus der KUNDENTYP-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
 - KUNDENTYP_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
 
+DIENSTLEISTUNG (pro Anteilsklasse — welche Vertriebsdienstleistung adressiert die Klasse):
+- Delegation: Klasse für diskretionäre Vermögensverwaltung / Verwaltungsmandat (DPM). \
+  Signale: "discretionary mandate", "Verwaltungsmandat", "im Rahmen eines Mandats", \
+  oft institutionelle/clean Klassen ohne Retrozession.
+- Beratung: Klasse für Anlageberatung. Signale: "advisory", "Anlageberatung", \
+  "im Rahmen einer Beratung", "advisory mandate".
+- Execution only: Klasse für beratungsfreien Direktvertrieb. Signale: "execution only", \
+  "ohne Beratung", "reine Ausführung".
+- DIENSTLEISTUNG: exakt ein Wert aus der DIENSTLEISTUNG-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
+- DIENSTLEISTUNG_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
+
+VERTRIEBSKANAL (pro Anteilsklasse — über welchen Kanal die Klasse vertrieben wird):
+- Captive Channel: Vertrieb über konzerneigenen/hauseigenen Kanal. \
+  Signale: "captive", "hausintern", "gruppenintern", "über die Vertriebsstellen des Initiators".
+- Finanzintermediäre: Vertrieb über externe Banken/Distributoren. \
+  Signale: "financial intermediaries", "Vertriebspartner", "distributing banks", "über Intermediäre".
+- Vermittler: Vertrieb über Broker/Makler/Agenten. \
+  Signale: "broker", "Makler", "tied agent", "Vermittler".
+- VERTRIEBSKANAL: exakt ein Wert aus der VERTRIEBSKANAL-Liste für DIESE Anteilsklasse (leer wenn nicht gefunden)
+- VERTRIEBSKANAL_ROH: exakter Wortlaut nur für diese Klasse, Format "S.<Nr>: <Text>"
+
+WICHTIG zu DIENSTLEISTUNG und VERTRIEBSKANAL: Diese beiden Felder sind in vielen Prospekten \
+NICHT explizit angegeben. Setze den Wert NUR wenn ein klarer textlicher Beleg für DIESE \
+Anteilsklasse existiert. Im Zweifel leer lassen — NICHT aus dem Klassennamen oder der TER ableiten/raten.
+
 MINDESTANLAGE (pro Anteilsklasse):
 - MINDESTANLAGE: Mindestzeichnungsbetrag exakt wie im Prospekt (Betrag + Währung, z.B. "10.000 CHF"). \
   Nur für diese Anteilsklasse — leer lassen wenn keine klassenspezifische Angabe gefunden.
@@ -141,6 +177,10 @@ BEKANNTE ISINs IN DIESEM FONDS:
       "anlegertyp_roh":       "S.<Nr>: exakter Wortlaut nur für diese Klasse",
       "kundentyp":            "exakt ein Wert aus KUNDENTYP-Liste (leer wenn nicht klassenspezifisch gefunden)",
       "kundentyp_roh":        "S.<Nr>: exakter Wortlaut nur für diese Klasse",
+      "dienstleistung":       "exakt ein Wert aus DIENSTLEISTUNG-Liste (leer wenn nicht gefunden)",
+      "dienstleistung_roh":   "S.<Nr>: exakter Wortlaut nur für diese Klasse",
+      "vertriebskanal":       "exakt ein Wert aus VERTRIEBSKANAL-Liste (leer wenn nicht gefunden)",
+      "vertriebskanal_roh":   "S.<Nr>: exakter Wortlaut nur für diese Klasse",
       "segmentierung":        "retail|institutional|qualified|mixed|unklar",
       "begruendung":          "max. 200 Zeichen — warum diese Kategorie",
       "mindestanlage":        "Betrag + Währung, z.B. '10.000 CHF' (leer wenn nicht gefunden)",
@@ -290,10 +330,14 @@ class ProspektAnalysisWindow(tk.Toplevel):
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
         ).pack(side="right", padx=(8, 4))
 
-        self._model_var = tk.StringVar(value=MODELS[0])
+        _init_provider = os.getenv("LLM_PROVIDER", "anthropic")
+        from llm_provider import DEFAULT_SINGLE_MODELS
+        _init_models = self._analysis_models(_init_provider)
+        _init_default = DEFAULT_SINGLE_MODELS.get(_init_provider, _init_models[0] if _init_models else "")
+        self._model_var = tk.StringVar(value=_init_default)
         self._model_combo = ttk.Combobox(
             inner, textvariable=self._model_var,
-            values=MODELS, state="readonly", width=28,
+            values=_init_models, state="readonly", width=28,
             font=("Segoe UI", 9),
         )
         self._model_combo.pack(side="right")
@@ -303,7 +347,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
         ).pack(side="right", padx=(16, 4))
 
-        self._provider_var = tk.StringVar(value="anthropic")
+        self._provider_var = tk.StringVar(value=os.getenv("LLM_PROVIDER", "anthropic"))
         provider_combo = ttk.Combobox(
             inner, textvariable=self._provider_var,
             values=["anthropic", "gemini", "openrouter"], state="readonly", width=12,
@@ -325,12 +369,23 @@ class ProspektAnalysisWindow(tk.Toplevel):
             buttonbackground=BTN_BG, relief="flat",
         ).pack(side="right")
 
+    @staticmethod
+    def _analysis_models(provider: str) -> list[str]:
+        """Modelle für die Analyse — ohne das günstige Batch-Modell (z.B. Haiku),
+        das für die Klassifizierung zu schwach ist. Trim/Preprocessing nutzt es separat."""
+        from llm_provider import get_models, DEFAULT_BATCH_MODELS
+        models = list(get_models(provider))
+        batch = DEFAULT_BATCH_MODELS.get(provider)
+        filtered = [m for m in models if m != batch]
+        return filtered or models
+
     def _on_provider_changed(self, _event=None):
-        from llm_provider import get_models, get_default_batch_model
+        from llm_provider import DEFAULT_SINGLE_MODELS
         provider = self._provider_var.get()
-        models = get_models(provider)
+        models = self._analysis_models(provider)
         self._model_combo.config(values=models)
-        self._model_var.set(get_default_batch_model(provider) if models else "")
+        # Analyse verwendet besseres Modell (Sonnet/Pro)
+        self._model_var.set(DEFAULT_SINGLE_MODELS.get(provider, models[0]) if models else "")
 
     def _build_table_area(self):
         # ── Aktionszeile ──────────────────────────────────────────────────────
@@ -399,6 +454,33 @@ class ProspektAnalysisWindow(tk.Toplevel):
             ctrl, textvariable=self._summary_var,
             bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8),
         ).pack(side="right")
+
+        # ── Zweite Aktionszeile: Batch-API (−50%, asynchron) ──────────────────
+        ctrl2 = tk.Frame(self, bg=BG_MAIN)
+        ctrl2.pack(fill="x", padx=12, pady=(0, 4))
+
+        tk.Label(
+            ctrl2, text="Batch-API (−50%, asynchron):",
+            bg=BG_MAIN, fg=FG_MUTED, font=("Segoe UI", 8),
+        ).pack(side="left", padx=(0, 6))
+
+        self.btn_batch = tk.Button(
+            ctrl2, text="📦  Batch starten (−50%)",
+            command=self._start_batch_pending,
+            bg="#2e2a1a", fg=ACCENT_YELLOW, relief="flat",
+            font=("Segoe UI", 9), padx=12, pady=3,
+            cursor="hand2", activebackground=BTN_ACTIVE,
+        )
+        self.btn_batch.pack(side="left")
+
+        self.btn_batch_fetch = tk.Button(
+            ctrl2, text="📥  Batch abholen",
+            command=self._fetch_batch_results,
+            bg="#1a1e2e", fg=ACCENT_LAVENDER, relief="flat",
+            font=("Segoe UI", 9), padx=12, pady=3,
+            cursor="hand2", activebackground=BTN_ACTIVE,
+        )
+        self.btn_batch_fetch.pack(side="left", padx=(6, 0))
 
         # ── Treeview ──────────────────────────────────────────────────────────
         tree_frame = tk.Frame(self, bg=BG_MAIN)
@@ -738,6 +820,149 @@ class ProspektAnalysisWindow(tk.Toplevel):
         if self._worker:
             self._worker.stop()
 
+    # ─── Batch-API (−50%, asynchron) ──────────────────────────────────────────
+
+    def _start_batch_pending(self):
+        provider = self._provider_var.get()
+        if provider != "anthropic":
+            messagebox.showinfo(
+                "Nur Anthropic",
+                "Die Batch-API (−50%) ist nur für den Anbieter 'anthropic' verfügbar.\n"
+                "Bitte Anbieter im Admin auf Anthropic stellen.",
+                parent=self,
+            )
+            return
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            messagebox.showerror("API-Key fehlt", "Kein ANTHROPIC_API_KEY in .env.", parent=self)
+            return
+
+        groups = {
+            d["key"]: d["rows"]
+            for d in self._table_data
+            if d["status"] in ("pending", "partial") and d["has_pdf"]
+        }
+        if not groups:
+            messagebox.showinfo("Nichts zu tun",
+                                "Keine ausstehenden Subfonds-Gruppen mit Prospekt.",
+                                parent=self)
+            return
+
+        if not messagebox.askyesno(
+            "Batch starten",
+            f"{len(groups)} Gruppe(n) per Batch-API analysieren (−50% Kosten).\n\n"
+            "Vorverarbeitung läuft jetzt synchron (Haiku), danach wird der Batch "
+            "eingereicht. Ergebnisse kommen asynchron (meist Minuten, max. 24h) — "
+            "dann mit dem Button 'Batch abholen' speichern.\n\nFortfahren?",
+            parent=self,
+        ):
+            return
+
+        model = self._model_var.get()
+        prompt = self._build_prompt_with_taxonomy()
+        self._set_running(True)
+        self._log_line(f"📦 Batch-Vorbereitung: {len(groups)} Gruppe(n), Modell {model} …")
+
+        def run():
+            import batch_analysis
+            from llm_provider import DEFAULT_BATCH_MODELS
+            trim_model = DEFAULT_BATCH_MODELS.get("anthropic", model)
+
+            def prog(done, total, msg):
+                self.after(0, lambda: self._log_line(f"  [{done}/{total}] {msg}"))
+
+            try:
+                batch_id = batch_analysis.submit_batch(
+                    groups=groups, prompt_template=prompt, model=model,
+                    api_key=api_key, trim_model=trim_model,
+                    provider="anthropic", progress=prog,
+                )
+                self.after(0, lambda: self._on_batch_submitted(batch_id))
+            except Exception as e:
+                self.after(0, lambda: (self._log_line(f"✗ Batch-Fehler: {e}"),
+                                       self._set_running(False),
+                                       messagebox.showerror("Batch-Fehler", str(e), parent=self)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_batch_submitted(self, batch_id: str):
+        self._set_running(False)
+        self._log_line(f"✓ Batch eingereicht: {batch_id}")
+        messagebox.showinfo(
+            "Batch eingereicht",
+            f"Batch-ID:\n{batch_id}\n\nErgebnisse später mit dem Button 'Batch abholen' speichern.",
+            parent=self,
+        )
+
+    def _fetch_batch_results(self):
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            messagebox.showerror("API-Key fehlt", "Kein ANTHROPIC_API_KEY in .env.", parent=self)
+            return
+
+        import batch_analysis
+        batches = batch_analysis.list_local_batches()
+        if not batches:
+            messagebox.showinfo("Keine Batches",
+                                "Keine lokal gespeicherten Batches gefunden.", parent=self)
+            return
+
+        # Jüngsten Batch vorschlagen; Nutzer kann ID überschreiben
+        default_id = batches[0]["batch_id"]
+        liste = "\n".join(
+            f"• {b['batch_id']}  ({b['created']}, {b['n_requests']} Req, {b['model']})"
+            for b in batches[:10]
+        )
+        batch_id = simpledialog.askstring(
+            "Batch abholen",
+            f"Verfügbare Batches:\n{liste}\n\nBatch-ID eingeben:",
+            initialvalue=default_id, parent=self,
+        )
+        if not batch_id:
+            return
+        batch_id = batch_id.strip()
+
+        self._set_running(True)
+        self._log_line(f"📥 Prüfe Batch {batch_id} …")
+
+        def run():
+            try:
+                status = batch_analysis.poll_batch(batch_id, api_key)
+                self.after(0, lambda: self._log_line(
+                    f"   Status: {status['status']}  {status['counts']}"))
+                if status["status"] != "ended":
+                    self.after(0, lambda: (self._set_running(False),
+                                           messagebox.showinfo(
+                                               "Noch nicht fertig",
+                                               f"Batch-Status: {status['status']}\n"
+                                               "Bitte später erneut abholen.", parent=self)))
+                    return
+
+                def prog(msg):
+                    self.after(0, lambda: self._log_line(f"   {msg}"))
+
+                res = batch_analysis.fetch_and_store(batch_id, api_key, progress=prog)
+                self.after(0, lambda: self._on_batch_fetched(res))
+            except Exception as e:
+                self.after(0, lambda: (self._log_line(f"✗ Abhol-Fehler: {e}"),
+                                       self._set_running(False),
+                                       messagebox.showerror("Fehler", str(e), parent=self)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_batch_fetched(self, res: dict):
+        self._set_running(False)
+        self._log_line(
+            f"✓ Batch gespeichert: {res['saved']} ISIN, "
+            f"{res['errored']} Fehler, {res['skipped']} übersprungen")
+        self._refresh_data()
+        messagebox.showinfo(
+            "Batch abgeholt",
+            f"Gespeichert: {res['saved']} ISIN\n"
+            f"Fehler: {res['errored']}\nÜbersprungen: {res['skipped']}",
+            parent=self,
+        )
+
     def _reset_large_pdfs(self):
         import pdf_analyzer
         from tkinter import messagebox
@@ -786,14 +1011,18 @@ class ProspektAnalysisWindow(tk.Toplevel):
     # ─── Prompt ───────────────────────────────────────────────────────────────
 
     def _build_prompt_with_taxonomy(self) -> str:
-        fondstyp_liste   = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("fondstyp"))
-        anlegertyp_liste = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("anlegertyp"))
-        kundentyp_liste  = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("kundentyp"))
+        fondstyp_liste       = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("fondstyp"))
+        anlegertyp_liste     = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("anlegertyp"))
+        kundentyp_liste      = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("kundentyp"))
+        dienstleistung_liste = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("dienstleistung"))
+        vertriebskanal_liste = "\n".join(f"  - {w}" for w in typologie_store.get_wert_liste("vertriebskanal"))
         return (
             self._prompt
-            .replace("{fondstyp_liste}",   fondstyp_liste   or "  (keine Werte definiert)")
-            .replace("{anlegertyp_liste}",  anlegertyp_liste or "  (keine Werte definiert)")
-            .replace("{kundentyp_liste}",  kundentyp_liste  or "  (keine Werte definiert)")
+            .replace("{fondstyp_liste}",       fondstyp_liste       or "  (keine Werte definiert)")
+            .replace("{anlegertyp_liste}",      anlegertyp_liste     or "  (keine Werte definiert)")
+            .replace("{kundentyp_liste}",       kundentyp_liste      or "  (keine Werte definiert)")
+            .replace("{dienstleistung_liste}",  dienstleistung_liste or "  (keine Werte definiert)")
+            .replace("{vertriebskanal_liste}",  vertriebskanal_liste or "  (keine Werte definiert)")
         )
 
     def _open_typologie(self):

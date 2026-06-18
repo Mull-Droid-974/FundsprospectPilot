@@ -181,7 +181,8 @@ class _ComparisonWorker(threading.Thread):
         for path in paths:
             try:
                 self._emit("log", f"[{side}] Extrahiere: {Path(path).name}")
-                text = pdf_analyzer.extract_relevant_text(path) or ""
+                text, _ = pdf_analyzer.extract_relevant_text(path)
+                text = text or ""
                 if text:
                     parts.append(f"[Dokument: {Path(path).name}]\n{text[:40_000]}")
                 else:

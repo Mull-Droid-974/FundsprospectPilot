@@ -24,12 +24,15 @@ import tkinter as tk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import anthropic
+import logging
 from dotenv import load_dotenv
 
 import pdf_analyzer
 import results_store
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # ─── Farben ──────────────────────────────────────────────────────────────────
 BG_MAIN         = "#1e1e2e"
@@ -62,14 +65,17 @@ BEHALTEN (vollständig):
 - Anteilsklassen-Tabellen mit ISIN, Mindestanlage, Währung, TER
 - Anleger-Beschränkungen und Zulassungskriterien
 - Regulatorische Klassifizierungen (MiFID, KAG/FIDLEG, UCITS, AIFMD)
+- Dienstleistungstyp: Delegation, Execution only, Beratung, Vermögensmanagement
+- Vertriebskanal: direkt, Captive Channel, Finanzintermediäre, Vermittler
 - Vertriebsbeschränkungen nach Land / Investorentyp
-- Abschnitte zu "Qualified Investors", "Professional Investors", "Retail"
+- Abschnitte zu "Qualified Investors", "Professional Investors", "Retail", "Accredited"
 
 ENTFERNEN (weglassen):
 - Allgemeine Risikobeschreibungen ohne Bezug zu Anlegertypen
 - Verwaltungsdetails (Depotbank, Revisoren, Zeichnungsfristen ohne Mindestanlage)
 - Historische Performance-Daten
 - Allgemeine Steuerhinweise
+- Detaillierte Vermögensallokation (nur Struktur-Übersicht behalten)
 
 Gib NUR den gekürzten Text zurück — kein Kommentar, keine Erklärung, \
 keine Markdown-Formatierung.\
@@ -224,6 +230,213 @@ def _merge_extracted(base: dict, new: dict) -> dict:
                         elif v and not matched_kl.get(k):
                             matched_kl[k] = v
     return base
+
+
+def _run_trim_headless(pdf_path: str, model: str, api_key: str, provider: str = "anthropic") -> bool:
+    """
+    Kürzt PDF zu .trimmed.txt ohne GUI/Queue-Overhead.
+    Günstiger als Extraktion — nur relevante Abschnitte.
+    Rückgabe: True wenn erfolgreich, False bei Fehler.
+    """
+    import time as _time
+
+    try:
+        pdf_path = Path(pdf_path)
+        out = pdf_path.with_suffix(".trimmed.txt")
+        if out.exists():
+            return True
+
+        full_text = pdf_analyzer.extract_text_from_pdf(str(pdf_path), max_pages=None) or ""
+        if not full_text:
+            logger.warning(f"[{pdf_path.name}] Kein Text extrahierbar")
+            return False
+
+        # Gratis-Vorfilter: nur klassifizierungsrelevante Abschnitte an die LLM schicken
+        # (reduziert die Trim-Eingabe von ~400K auf ≤80K Zeichen). Tabellen sind separat
+        # in .tables.json gesichert; bei zu wenig Treffern fällt der Filter auf den
+        # Dokumentanfang zurück.
+        from utils import extract_relevant_sections
+        orig_len = len(full_text)
+        full_text = extract_relevant_sections(full_text)
+        logger.info(f"[{pdf_path.name}] Vorfilter: {orig_len:,} → {len(full_text):,} Zeichen")
+
+        chunks = _chunk_text(full_text)
+        logger.info(f"[{pdf_path.name}] Trimme {len(chunks)} Chunk(s)")
+
+        trimmed_parts = []
+        for i, chunk in enumerate(chunks):
+            t_start = _time.time()
+            try:
+                if provider.lower() == "gemini":
+                    try:
+                        from google import genai
+                        from google.genai import types
+                    except ImportError:
+                        logger.error("google-genai nicht installiert")
+                        return False
+                    client = genai.Client(api_key=api_key)
+                    resp = client.models.generate_content(
+                        model=model,
+                        contents=chunk,
+                        config=types.GenerateContentConfig(
+                            system_instruction=_DEFAULT_PROMPT,
+                            max_output_tokens=8192,
+                        ),
+                    )
+                    trimmed = resp.text if hasattr(resp, "text") else ""
+                elif provider.lower() == "openrouter":
+                    try:
+                        from openai import OpenAI
+                    except ImportError:
+                        logger.error("openai nicht installiert")
+                        return False
+                    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+                    resp = client.chat.completions.create(
+                        model=model,
+                        max_tokens=8192,
+                        messages=[
+                            {"role": "system", "content": _DEFAULT_PROMPT},
+                            {"role": "user", "content": chunk},
+                        ],
+                    )
+                    trimmed = (resp.choices[0].message.content or "") if resp.choices else ""
+                else:  # anthropic
+                    client = anthropic.Anthropic(api_key=api_key)
+                    resp = client.messages.create(
+                        model=model,
+                        max_tokens=8192,
+                        system=[{"type": "text", "text": _DEFAULT_PROMPT,
+                                 "cache_control": {"type": "ephemeral"}}],
+                        messages=[{"role": "user", "content": [
+                            {"type": "text", "text": chunk[:80_000],
+                             "cache_control": {"type": "ephemeral"}},
+                        ]}],
+                    )
+                    trimmed = "".join(b.text for b in resp.content if hasattr(b, "text"))
+
+                if trimmed:
+                    trimmed_parts.append(trimmed)
+            except Exception as exc:
+                logger.error(f"[{pdf_path.name}] Chunk {i+1} Fehler: {exc}")
+                return False
+
+            if len(chunks) > 1 and i < len(chunks) - 1:
+                wait = max(0.0, _CHUNK_MIN_INTERVAL - (_time.time() - t_start))
+                if wait > 0:
+                    _time.sleep(wait)
+
+        # Speichern
+        result_text = "\n\n".join(trimmed_parts)
+        out.write_text(result_text, encoding="utf-8")
+        logger.info(f"[{pdf_path.name}] Trimmen fertig → {out.name} ({len(result_text):,} Zeichen)")
+        return True
+    except Exception as exc:
+        logger.error(f"Auto-Trimmen Error: {exc}")
+        return False
+
+
+def _run_extraction_headless(pdf_path: str, model: str, api_key: str, provider: str = "anthropic") -> bool:
+    """
+    Extrahiert PDF zu .extracted.json ohne GUI/Queue-Overhead.
+    Verwendet für Auto-Extraktion in der Batch-Analyse.
+    Rückgabe: True wenn erfolgreich, False bei Fehler.
+    """
+    import time as _time
+
+    try:
+        pdf_path = Path(pdf_path)
+        out = pdf_path.with_suffix(".extracted.json")
+        if out.exists():
+            return True
+
+        full_text = pdf_analyzer.extract_text_from_pdf(str(pdf_path), max_pages=None) or ""
+        if not full_text:
+            logger.warning(f"[{pdf_path.name}] Kein Text extrahierbar")
+            return False
+
+        chunks = _chunk_text(full_text)
+        logger.info(f"[{pdf_path.name}] Extrahiere {len(chunks)} Chunk(s)")
+
+        extracted: dict = {}
+        for i, chunk in enumerate(chunks):
+            t_start = _time.time()
+            try:
+                if provider.lower() == "gemini":
+                    try:
+                        from google import genai
+                        from google.genai import types
+                    except ImportError:
+                        logger.error("google-genai nicht installiert")
+                        return False
+                    client = genai.Client(api_key=api_key)
+                    resp = client.models.generate_content(
+                        model=model,
+                        contents=chunk,
+                        config=types.GenerateContentConfig(
+                            system_instruction=_EXTRACT_PROMPT,
+                            max_output_tokens=4096,
+                        ),
+                    )
+                    raw = resp.text if hasattr(resp, "text") else ""
+                elif provider.lower() == "openrouter":
+                    try:
+                        from openai import OpenAI
+                    except ImportError:
+                        logger.error("openai nicht installiert")
+                        return False
+                    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+                    resp = client.chat.completions.create(
+                        model=model,
+                        max_tokens=4096,
+                        messages=[
+                            {"role": "system", "content": _EXTRACT_PROMPT},
+                            {"role": "user", "content": chunk},
+                        ],
+                    )
+                    raw = (resp.choices[0].message.content or "") if resp.choices else ""
+                else:  # anthropic
+                    client = anthropic.Anthropic(api_key=api_key)
+                    resp = client.messages.create(
+                        model=model,
+                        max_tokens=4096,
+                        system=[{"type": "text", "text": _EXTRACT_PROMPT,
+                                 "cache_control": {"type": "ephemeral"}}],
+                        messages=[{"role": "user", "content": [
+                            {"type": "text", "text": chunk,
+                             "cache_control": {"type": "ephemeral"}},
+                        ]}],
+                    )
+                    raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+
+                # Parse JSON
+                raw = raw.strip()
+                for marker in ("```json", "```"):
+                    if marker in raw:
+                        raw = raw.split(marker)[1].split("```")[0].strip()
+                        break
+                start, end = raw.find("{"), raw.rfind("}") + 1
+                if start >= 0 and end > start:
+                    try:
+                        part = json.loads(raw[start:end])
+                        extracted = _merge_extracted(extracted, part)
+                    except json.JSONDecodeError:
+                        logger.warning(f"[{pdf_path.name}] Chunk {i+1}: JSON-Parse fehlgeschlagen")
+            except Exception as exc:
+                logger.error(f"[{pdf_path.name}] Chunk {i+1} Fehler: {exc}")
+                return False
+
+            if len(chunks) > 1 and i < len(chunks) - 1:
+                wait = max(0.0, _CHUNK_MIN_INTERVAL - (_time.time() - t_start))
+                if wait > 0:
+                    _time.sleep(wait)
+
+        # Speichern
+        out.write_text(json.dumps(extracted, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"[{pdf_path.name}] Extraktion fertig → {out.name}")
+        return True
+    except Exception as exc:
+        logger.error(f"Auto-Extraktion Error: {exc}")
+        return False
 
 
 # ─── Worker ──────────────────────────────────────────────────────────────────
@@ -823,7 +1036,8 @@ class PdfTrimWindow(tk.Toplevel):
         tk.Label(inner, text="Modell:", bg=BG_PANEL, fg=FG_MUTED,
                  font=("Segoe UI", 9)).pack(side="right", padx=(8, 2))
 
-        self._provider_var = tk.StringVar(value="anthropic")
+        import os
+        self._provider_var = tk.StringVar(value=os.getenv("LLM_PROVIDER", "anthropic"))
         provider_combo = ttk.Combobox(
             inner, textvariable=self._provider_var,
             values=["anthropic", "gemini", "openrouter"], state="readonly", width=12,
@@ -993,11 +1207,12 @@ class PdfTrimWindow(tk.Toplevel):
             pass
 
     def _on_provider_changed(self, _event=None):
-        from llm_provider import get_models, get_default_batch_model
+        from llm_provider import get_models, DEFAULT_BATCH_MODELS
         provider = self._provider_var.get()
         models = get_models(provider)
         self._model_combo.config(values=models)
-        self._model_var.set(get_default_batch_model(provider) if models else "")
+        # Trim verwendet günstiges Modell (Haiku/Flash)
+        self._model_var.set(DEFAULT_BATCH_MODELS.get(provider, models[0]) if models else "")
 
     def _refresh_list(self):
         self._load_isin_map()
