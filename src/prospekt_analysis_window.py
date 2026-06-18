@@ -848,12 +848,14 @@ class ProspektAnalysisWindow(tk.Toplevel):
                                 parent=self)
             return
 
+        _CHUNK = 10  # in 10er-Blöcken einreichen → erste Batches gehen sofort raus
         if not messagebox.askyesno(
             "Batch starten",
             f"{len(groups)} Gruppe(n) per Batch-API analysieren (−50% Kosten).\n\n"
-            "Vorverarbeitung läuft jetzt synchron (Haiku), danach wird der Batch "
-            "eingereicht. Ergebnisse kommen asynchron (meist Minuten, max. 24h) — "
-            "dann mit dem Button 'Batch abholen' speichern.\n\nFortfahren?",
+            f"Wird in {_CHUNK}er-Blöcken eingereicht — die ersten Batches gehen sofort "
+            "raus, der Rest folgt während der Vorbereitung. Abbruchsicher.\n\n"
+            "Ergebnisse kommen asynchron (meist Minuten, max. 24h) — dann mit dem "
+            "Button 'Batch abholen' speichern.\n\nFortfahren?",
             parent=self,
         ):
             return
@@ -861,7 +863,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
         model = self._model_var.get()
         prompt = self._build_prompt_with_taxonomy()
         self._set_running(True)
-        self._log_line(f"📦 Batch-Vorbereitung: {len(groups)} Gruppe(n), Modell {model} …")
+        self._log_line(f"📦 Batch-Vorbereitung: {len(groups)} Gruppe(n) in {_CHUNK}er-Blöcken, Modell {model} …")
 
         def run():
             import batch_analysis
@@ -872,12 +874,12 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 self.after(0, lambda: self._log_line(f"  [{done}/{total}] {msg}"))
 
             try:
-                batch_id = batch_analysis.submit_batch(
+                batch_ids = batch_analysis.submit_batch(
                     groups=groups, prompt_template=prompt, model=model,
                     api_key=api_key, trim_model=trim_model,
-                    provider="anthropic", progress=prog,
+                    provider="anthropic", progress=prog, chunk_size=_CHUNK,
                 )
-                self.after(0, lambda: self._on_batch_submitted(batch_id))
+                self.after(0, lambda: self._on_batch_submitted(batch_ids))
             except Exception as e:
                 self.after(0, lambda: (self._log_line(f"✗ Batch-Fehler: {e}"),
                                        self._set_running(False),
@@ -885,12 +887,14 @@ class ProspektAnalysisWindow(tk.Toplevel):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_batch_submitted(self, batch_id: str):
+    def _on_batch_submitted(self, batch_ids: list):
         self._set_running(False)
-        self._log_line(f"✓ Batch eingereicht: {batch_id}")
+        self._log_line(f"✓ {len(batch_ids)} Batch-Block/Blöcke eingereicht.")
         messagebox.showinfo(
-            "Batch eingereicht",
-            f"Batch-ID:\n{batch_id}\n\nErgebnisse später mit dem Button 'Batch abholen' speichern.",
+            "Batches eingereicht",
+            f"{len(batch_ids)} Block/Blöcke eingereicht.\n\n"
+            "Ergebnisse später mit dem Button 'Batch abholen' speichern "
+            "(holt automatisch alle fertigen Blöcke).",
             parent=self,
         )
 
@@ -903,45 +907,23 @@ class ProspektAnalysisWindow(tk.Toplevel):
         import batch_analysis
         batches = batch_analysis.list_local_batches()
         if not batches:
-            messagebox.showinfo("Keine Batches",
-                                "Keine lokal gespeicherten Batches gefunden.", parent=self)
+            messagebox.showinfo(
+                "Keine Batches",
+                "Keine lokal gespeicherten Batches gefunden.\n\n"
+                "Hinweis: Eine Batch-ID entsteht erst, wenn im Log "
+                "'✓ … Block eingereicht' steht. Während der Vorbereitung "
+                "(Vorbereitung x/y) gibt es noch nichts abzuholen.",
+                parent=self)
             return
-
-        # Jüngsten Batch vorschlagen; Nutzer kann ID überschreiben
-        default_id = batches[0]["batch_id"]
-        liste = "\n".join(
-            f"• {b['batch_id']}  ({b['created']}, {b['n_requests']} Req, {b['model']})"
-            for b in batches[:10]
-        )
-        batch_id = simpledialog.askstring(
-            "Batch abholen",
-            f"Verfügbare Batches:\n{liste}\n\nBatch-ID eingeben:",
-            initialvalue=default_id, parent=self,
-        )
-        if not batch_id:
-            return
-        batch_id = batch_id.strip()
 
         self._set_running(True)
-        self._log_line(f"📥 Prüfe Batch {batch_id} …")
+        self._log_line(f"📥 Prüfe {len(batches)} lokale(n) Batch-Block/Blöcke …")
 
         def run():
+            def prog(msg):
+                self.after(0, lambda: self._log_line(f"   {msg}"))
             try:
-                status = batch_analysis.poll_batch(batch_id, api_key)
-                self.after(0, lambda: self._log_line(
-                    f"   Status: {status['status']}  {status['counts']}"))
-                if status["status"] != "ended":
-                    self.after(0, lambda: (self._set_running(False),
-                                           messagebox.showinfo(
-                                               "Noch nicht fertig",
-                                               f"Batch-Status: {status['status']}\n"
-                                               "Bitte später erneut abholen.", parent=self)))
-                    return
-
-                def prog(msg):
-                    self.after(0, lambda: self._log_line(f"   {msg}"))
-
-                res = batch_analysis.fetch_and_store(batch_id, api_key, progress=prog)
+                res = batch_analysis.fetch_all_pending(api_key, progress=prog)
                 self.after(0, lambda: self._on_batch_fetched(res))
             except Exception as e:
                 self.after(0, lambda: (self._log_line(f"✗ Abhol-Fehler: {e}"),
@@ -953,13 +935,17 @@ class ProspektAnalysisWindow(tk.Toplevel):
     def _on_batch_fetched(self, res: dict):
         self._set_running(False)
         self._log_line(
-            f"✓ Batch gespeichert: {res['saved']} ISIN, "
-            f"{res['errored']} Fehler, {res['skipped']} übersprungen")
+            f"✓ Abgeholt: {res['saved']} ISIN gespeichert, "
+            f"{res['ended']} Block/Blöcke fertig, {res['pending']} noch in Arbeit, "
+            f"{res['errored']} Fehler")
         self._refresh_data()
         messagebox.showinfo(
             "Batch abgeholt",
             f"Gespeichert: {res['saved']} ISIN\n"
-            f"Fehler: {res['errored']}\nÜbersprungen: {res['skipped']}",
+            f"Fertige Blöcke: {res['ended']}\n"
+            f"Noch in Arbeit: {res['pending']}\n"
+            f"Fehler: {res['errored']}\n\n"
+            "Noch nicht fertige Blöcke später erneut abholen.",
             parent=self,
         )
 
