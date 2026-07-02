@@ -12,6 +12,7 @@ Nur für Anbieter "anthropic". Ergebnisse kommen asynchron (meist Minuten, max. 
 
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +26,10 @@ from llm_analysis_worker import (
 
 _BATCH_DIR = Path(__file__).parent.parent / "data" / "output" / "batches"
 _MAX_TOKENS = 16384
+# Batch-Create gegen transiente Infra-Fehler (502/503/Timeout) absichern, damit
+# ein kurzer Ausfall nicht die gesamte (teure) Vorbereitung verwirft.
+_CREATE_MAX_RETRIES = 5
+_CREATE_BACKOFF_BASE = 2  # Sekunden, exponentiell
 
 
 def _mapping_path(batch_id: str) -> Path:
@@ -60,7 +65,32 @@ def submit_batch(groups: dict, prompt_template: str, model: str, api_key: str,
         nonlocal requests, mapping
         if not requests:
             return
-        batch = client.messages.batches.create(requests=requests)
+        # Transiente Infra-Fehler (502/503/Timeout/Verbindung) mit Backoff wiederholen.
+        # 4xx (z.B. erreichtes Spend-Limit) ist NICHT transient → sofort durchreichen.
+        batch = None
+        last_exc = None
+        for attempt in range(1, _CREATE_MAX_RETRIES + 1):
+            try:
+                batch = client.messages.batches.create(requests=requests)
+                break
+            except (anthropic.APIConnectionError, anthropic.APITimeoutError) as exc:
+                last_exc = exc
+            except anthropic.APIStatusError as exc:
+                if exc.status_code < 500:
+                    raise
+                last_exc = exc
+            if attempt < _CREATE_MAX_RETRIES:
+                wait = min(_CREATE_BACKOFF_BASE * 2 ** (attempt - 1), 60)
+                if progress:
+                    progress(total, total,
+                             f"[WARTEN] Batch-Create-Fehler (Versuch {attempt}/{_CREATE_MAX_RETRIES}) "
+                             f"— erneut in {wait}s …")
+                time.sleep(wait)
+        if batch is None:
+            raise RuntimeError(
+                f"Batch-Create nach {_CREATE_MAX_RETRIES} Versuchen fehlgeschlagen "
+                f"({len(requests)} vorbereitete Requests): {last_exc}"
+            )
         _mapping_path(batch.id).write_text(json.dumps({
             "batch_id": batch.id,
             "model": model,
@@ -70,7 +100,7 @@ def submit_batch(groups: dict, prompt_template: str, model: str, api_key: str,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         batch_ids.append(batch.id)
         if progress:
-            progress(total, total, f"✓ Block eingereicht: {batch.id} ({len(requests)} Req)")
+            progress(total, total, f"[OK] Block eingereicht: {batch.id} ({len(requests)} Req)")
         requests = []
         mapping = {}
 
@@ -165,7 +195,7 @@ def fetch_and_store(batch_id: str, api_key: str, progress=None) -> dict:
         if getattr(result, "type", "") != "succeeded":
             errored += 1
             if progress:
-                progress(f"✗ {info['group_key']}: {getattr(result, 'type', 'fehler')}")
+                progress(f"[FEHLER] {info['group_key']}: {getattr(result, 'type', 'fehler')}")
             continue
 
         raw = "".join(b.text for b in result.message.content if hasattr(b, "text"))
@@ -178,11 +208,11 @@ def fetch_and_store(batch_id: str, api_key: str, progress=None) -> dict:
             match_and_save(parsed, info["rows"], model, wert_maps)
             saved += len(info["rows"])
             if progress:
-                progress(f"✓ {info['group_key']} ({len(info['rows'])} ISIN)")
+                progress(f"[OK] {info['group_key']} ({len(info['rows'])} ISIN)")
         except Exception as e:
             errored += 1
             if progress:
-                progress(f"✗ {info['group_key']}: {e}")
+                progress(f"[FEHLER] {info['group_key']}: {e}")
 
     return {"saved": saved, "errored": errored, "skipped": skipped}
 
@@ -221,13 +251,13 @@ def fetch_all_pending(api_key: str, progress=None) -> dict:
             status = poll_batch(bid, api_key)
         except Exception as e:
             if progress:
-                progress(f"✗ {bid}: Status-Fehler {e}")
+                progress(f"[FEHLER] {bid}: Status-Fehler {e}")
             continue
 
         if status["status"] != "ended":
             agg["pending"] += 1
             if progress:
-                progress(f"⏳ {bid}: {status['status']} {status['counts']}")
+                progress(f"[WARTEN] {bid}: {status['status']} {status['counts']}")
             continue
 
         agg["ended"] += 1

@@ -63,7 +63,7 @@ def prepare_pdf_text(pdf_path: str, trim_model: str, api_key: str,
             pages = pdf_analyzer.get_pdf_metadata(pdf_path).get("pages", 0)
             if size_mb > _MAX_PDF_SIZE_MB or pages > pdf_analyzer._MAX_PAGES:
                 from pdf_trim_window import _run_trim_headless
-                logger.info(f"[{pdf.name}] Auto-Trimmen (Haiku, {size_mb:.1f} MB, {pages} Seiten)")
+                logger.info(f"[{pdf.name}] Auto-Trimmen ({trim_model}, {size_mb:.1f} MB, {pages} Seiten)")
                 _run_trim_headless(pdf_path, model=trim_model,
                                    api_key=api_key, provider=provider)
         except Exception as e:
