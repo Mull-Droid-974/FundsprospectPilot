@@ -43,7 +43,6 @@ class App(tk.Tk):
         self._data_mgmt_win = None
         self._download_win = None
         self._analysis_win = None
-        self._pdf_trim_win = None
         self._comparison_win = None
         self._morningstar_win = None
 
@@ -94,17 +93,14 @@ class App(tk.Tk):
 
         # ── Verarbeitung ─────────────────────────────────────────────
         self._section_label(sb, "VERARBEITUNG")
-        self._nav_btn(sb, "✂",  "3. PDF-Kürzen", self._open_pdf_trim_window,  ACCENT_BLUE)
-        tk.Label(sb, text="   (optional)", bg=BG_PANEL, fg=FG_MUTED,
-                 font=("Segoe UI", 7, "italic"), anchor="w").pack(fill="x", padx=16)
-        self._nav_btn(sb, "🔬", "4. Analyse",    self._open_analysis_window,   ACCENT_LAVENDER)
+        self._nav_btn(sb, "🔬", "3. Analyse",    self._open_analysis_window,   ACCENT_LAVENDER)
 
         ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(8, 6))
 
         # ── Auswertung ───────────────────────────────────────────────
         self._section_label(sb, "AUSWERTUNG")
-        self._nav_btn(sb, "📊", "5. Ergebnisse", self._open_results,           ACCENT_GREEN)
-        self._nav_btn(sb, "⚖",  "6. Vergleich", self._open_comparison_window,  ACCENT_YELLOW)
+        self._nav_btn(sb, "📊", "4. Ergebnisse", self._open_results,           ACCENT_GREEN)
+        self._nav_btn(sb, "⚖",  "5. Vergleich", self._open_comparison_window,  ACCENT_YELLOW)
 
         ttk.Separator(sb, orient="horizontal").pack(fill="x", padx=12, pady=(8, 6))
 
@@ -373,14 +369,6 @@ class App(tk.Tk):
             self._analysis_win.focus_force()
         else:
             self._analysis_win = ProspektAnalysisWindow(self)
-
-    def _open_pdf_trim_window(self):
-        from pdf_trim_window import PdfTrimWindow
-        if self._pdf_trim_win and self._pdf_trim_win.winfo_exists():
-            self._pdf_trim_win.lift()
-            self._pdf_trim_win.focus_force()
-        else:
-            self._pdf_trim_win = PdfTrimWindow(self)
 
     def _open_comparison_window(self):
         from comparison_window import ComparisonWindow

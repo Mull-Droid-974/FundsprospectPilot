@@ -200,7 +200,6 @@ _STATUS_TEXT = {
 
 _COLS = [
     ("pdf",       "PDF",                40, "center"),
-    ("trim",      "✂",                  30, "center"),
     ("name",      "Subfonds / Name",   270, "w"),
     ("umbrella",  "Umbrella",          170, "w"),
     ("total",     "ISINs",              55, "center"),
@@ -284,19 +283,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
         )
         self.btn_stop.pack(side="right", padx=(4, 0))
 
-        btn_reset = tk.Button(
-            inner, text="⚠ Grosse PDFs zurücksetzen",
-            command=self._reset_large_pdfs,
-            bg="#2e1a00", fg=ACCENT_YELLOW, relief="flat",
-            font=("Segoe UI", 9), padx=10, pady=3, cursor="hand2",
-            activebackground=BTN_ACTIVE,
-        )
-        btn_reset.pack(side="right", padx=(4, 0))
-        _Tooltip(btn_reset,
-            "Setzt LLM-Analyseergebnisse zurück für ISINs, deren PDF mehr als\n"
-            "2000 Seiten hat und noch nicht automatisch gekürzt wurde.\n"
-            "Die Analyse kann danach erneut gestartet werden.")
-
         btn_prompt = tk.Button(
             inner, text="✏  Prompt",
             command=self._open_prompt_editor,
@@ -348,14 +334,12 @@ class ProspektAnalysisWindow(tk.Toplevel):
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 9),
         ).pack(side="right", padx=(16, 4))
 
-        self._provider_var = tk.StringVar(value=os.getenv("LLM_PROVIDER", "anthropic"))
-        provider_combo = ttk.Combobox(
-            inner, textvariable=self._provider_var,
-            values=["anthropic", "gemini", "openrouter"], state="readonly", width=12,
-            font=("Segoe UI", 9),
-        )
-        provider_combo.pack(side="right")
-        provider_combo.bind("<<ComboboxSelected>>", self._on_provider_changed)
+        # Anthropic-only (natives PDF) — kein Provider-/Trim-Wechsel mehr
+        self._provider_var = tk.StringVar(value="anthropic")
+        tk.Label(
+            inner, text="Anthropic · nativ",
+            bg=BG_PANEL, fg=ACCENT_GREEN, font=("Segoe UI", 9, "bold"),
+        ).pack(side="right")
 
         tk.Label(
             inner, text="Worker:",
@@ -376,14 +360,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
         Batch-/Trim-Modell mehr — natives PDF + Seiten-Reduktion ersetzen das Trimmen."""
         from llm_provider import get_models
         return list(get_models(provider))
-
-    def _on_provider_changed(self, _event=None):
-        from llm_provider import DEFAULT_SINGLE_MODELS
-        provider = self._provider_var.get()
-        models = self._analysis_models(provider)
-        self._model_combo.config(values=models)
-        # Analyse verwendet besseres Modell (Sonnet/Pro)
-        self._model_var.set(DEFAULT_SINGLE_MODELS.get(provider, models[0]) if models else "")
 
     def _build_table_area(self):
         # ── Aktionszeile ──────────────────────────────────────────────────────
@@ -576,11 +552,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 r.get("prospekt_pfad") and Path(r["prospekt_pfad"]).exists()
                 for r in rows
             )
-            has_trimmed = any(
-                r.get("prospekt_pfad")
-                and Path(r["prospekt_pfad"]).with_suffix(".trimmed.txt").exists()
-                for r in rows
-            )
             n_analyzed = sum(1 for r in rows if r.get("llm_segmentierung"))
             n_pending  = len(rows) - n_analyzed
 
@@ -626,7 +597,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
                 "status":    status,
                 "last_date":   last_date,
                 "has_pdf":     has_pdf,
-                "has_trimmed": has_trimmed,
             })
 
         # Zusammenfassung
@@ -664,7 +634,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
             date_disp    = item["last_date"][:16] if item["last_date"] else "—"
             self._tree.insert("", "end", iid=item["key"], values=(
                 "✓" if item["has_pdf"] else "✗",
-                "✂" if item["has_trimmed"] else "—",
                 item["name"][:70],
                 item["umbrella"],
                 item["total"],
@@ -789,16 +758,11 @@ class ProspektAnalysisWindow(tk.Toplevel):
         if self._worker and self._worker.is_alive():
             return
         self._batch_errors = []
-        provider = self._provider_var.get()
-        _key_env = {
-            "gemini":     "GOOGLE_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-        }.get(provider, "ANTHROPIC_API_KEY")
-        api_key = os.getenv(_key_env, "")
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
         if not api_key:
             messagebox.showerror(
                 "API-Key fehlt",
-                f"Kein {_key_env} in .env gefunden.\n"
+                "Kein ANTHROPIC_API_KEY in .env gefunden.\n"
                 "Bitte im Admin-Bereich konfigurieren.",
                 parent=self,
             )
@@ -873,8 +837,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
 
         def run():
             import batch_analysis
-            from llm_provider import DEFAULT_BATCH_MODELS
-            trim_model = DEFAULT_BATCH_MODELS.get("anthropic", model)
 
             def prog(done, total, msg):
                 self.after(0, lambda: self._log_line(f"  [{done}/{total}] {msg}"))
@@ -882,7 +844,7 @@ class ProspektAnalysisWindow(tk.Toplevel):
             try:
                 batch_ids = batch_analysis.submit_batch(
                     groups=groups, prompt_template=prompt, model=model,
-                    api_key=api_key, trim_model=trim_model,
+                    api_key=api_key,
                     provider="anthropic", progress=prog, chunk_size=_CHUNK,
                 )
                 self.after(0, lambda: self._on_batch_submitted(batch_ids))
@@ -954,42 +916,6 @@ class ProspektAnalysisWindow(tk.Toplevel):
             "Noch nicht fertige Blöcke später erneut abholen.",
             parent=self,
         )
-
-    def _reset_large_pdfs(self):
-        import pdf_analyzer
-        from tkinter import messagebox
-        candidates = []
-        for row in results_store.get_all_results():
-            if not row.get("llm_segmentierung"):
-                continue
-            pdf_path = row.get("prospekt_pfad") or ""
-            if not pdf_path or not Path(pdf_path).exists():
-                continue
-            if Path(pdf_path).with_suffix(".trimmed.txt").exists():
-                continue
-            pages = pdf_analyzer.get_pdf_metadata(pdf_path).get("pages", 0)
-            if pages > pdf_analyzer._MAX_PAGES:
-                candidates.append(row["isin"])
-
-        if not candidates:
-            messagebox.showinfo(
-                "Keine Treffer",
-                "Keine analysierten ISINs mit grossem PDF (ohne .trimmed.txt) gefunden.",
-                parent=self,
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Zurücksetzen bestätigen",
-            f"{len(candidates)} ISIN(s) gefunden deren PDF > {pdf_analyzer._MAX_PAGES} Seiten hat "
-            f"und noch kein .trimmed.txt besitzt.\n\nAnalyseergebnisse zurücksetzen?",
-            parent=self,
-        ):
-            return
-
-        results_store.reset_llm_analysis(candidates)
-        self._log_line(f"↺ {len(candidates)} ISIN(s) zurückgesetzt — bitte PDF-Kürzer verwenden, dann erneut analysieren.")
-        self._refresh_data()
 
     def _set_running(self, running: bool):
         s_on  = "disabled" if running else "normal"
