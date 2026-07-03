@@ -25,9 +25,8 @@ OPENROUTER_MODELS = [
 
 MODELS: dict[str, list[str]] = {
     "anthropic": [
-        "claude-haiku-4-5-20251001",
         "claude-sonnet-4-6",
-        "claude-opus-4-7",
+        "claude-opus-4-8",
     ],
     "gemini": [
         "gemini-2.5-flash",
@@ -42,7 +41,7 @@ MODELS: dict[str, list[str]] = {
 
 # Standard-Modelle (Batch / Einzel-PDF)
 DEFAULT_BATCH_MODELS = {
-    "anthropic":  os.getenv("CLAUDE_BATCH_MODEL",       "claude-haiku-4-5-20251001"),
+    "anthropic":  os.getenv("CLAUDE_BATCH_MODEL",       "claude-sonnet-4-6"),
     "gemini":     os.getenv("GEMINI_BATCH_MODEL",        "gemini-2.5-flash"),
     "openrouter": os.getenv("OPENROUTER_BATCH_MODEL",    "qwen/qwen-2.5-72b-instruct"),
 }

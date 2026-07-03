@@ -15,7 +15,7 @@ load_dotenv()
 # - claude-haiku-4-5-20251001  → für Batch (günstig, schnell)
 # - claude-sonnet-4-6          → für Einzel-PDF (bessere Qualität)
 # - claude-opus-4-6            → für schwierige Fälle
-DEFAULT_BATCH_MODEL = os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001")
+DEFAULT_BATCH_MODEL = os.getenv("CLAUDE_BATCH_MODEL", "claude-sonnet-4-6")
 DEFAULT_SINGLE_MODEL = os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6")
 
 # Klassifizierungsergebnis-Struktur

@@ -7,7 +7,6 @@ der Gruppe klassifiziert. Ergebnisse werden direkt in der DB gespeichert.
 
 import json
 import queue
-import re
 import sys
 import threading
 import time
@@ -19,68 +18,18 @@ sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(_
 
 import anthropic
 
-import pdf_analyzer
 import results_store
 import typologie_store
-from pdf_analyzer import extract_relevant_text
 from utils import logger
 
 
 _RATE_LIMIT_WAIT_SEC  = 70          # 70s warten bei Rate Limit (Tokens/Minute-Fenster)
 _RATE_LIMIT_MAX_RETRIES = 6
-_MAX_PDF_SIZE_MB = 30              # PDFs über diesem Limit werden übersprungen
+_STOPPED = object()                 # Sentinel: Analyse wurde vom Nutzer abgebrochen
 
 
 class _RateLimitRetry(Exception):
     """Internes Signal: Rate Limit — Retry nach Wartezeit."""
-
-
-def _format_tables_for_prompt(tables: list[dict]) -> str:
-    """Formatiert extrahierte PDF-Tabellen als lesbaren Kontext für den LLM-Prompt."""
-    lines = ["### ANTEILSKLASSEN-TABELLEN (strukturiert aus PDF):"]
-    for t in tables:
-        lines.append(f"\n--- Seite {t['page']} ---")
-        lines.append(" | ".join(t.get("headers", [])))
-        lines.append("-" * 40)
-        for row in t.get("rows", []):
-            lines.append(" | ".join(row))
-    return "\n".join(lines)
-
-
-def prepare_pdf_text(pdf_path: str, trim_model: str, api_key: str,
-                     provider: str = "anthropic") -> str:
-    """Bereitet den Analyse-Text für ein PDF vor: Auto-Trim großer PDFs (auf
-    trim_model/Haiku), dann extract_relevant_text + Tabellen + 40K-Cap.
-    Gibt den fertigen Prompt-Text zurück ("" bei Fehler)."""
-    pdf = Path(pdf_path)
-    has_extracted = pdf.with_suffix(".extracted.json").exists()
-    has_trimmed   = pdf.with_suffix(".trimmed.txt").exists()
-
-    # Auto-Trimmen für große PDFs wenn nichts Vorverarbeitetes existiert
-    if not has_extracted and not has_trimmed:
-        try:
-            size_mb = pdf.stat().st_size / 1_048_576
-            pages = pdf_analyzer.get_pdf_metadata(pdf_path).get("pages", 0)
-            if size_mb > _MAX_PDF_SIZE_MB or pages > pdf_analyzer._MAX_PAGES:
-                from pdf_trim_window import _run_trim_headless
-                logger.info(f"[{pdf.name}] Auto-Trimmen ({trim_model}, {size_mb:.1f} MB, {pages} Seiten)")
-                _run_trim_headless(pdf_path, model=trim_model,
-                                   api_key=api_key, provider=provider)
-        except Exception as e:
-            logger.warning(f"Auto-Trimmen fehlgeschlagen für {pdf_path}: {e}")
-
-    pdf_text, used_extracted = extract_relevant_text(pdf_path)
-    pdf_text = pdf_text or ""
-    if not pdf_text:
-        return ""
-
-    # Tabellen nur prependen wenn NICHT extracted.json (dort bereits enthalten)
-    if not used_extracted:
-        tables = pdf_analyzer.load_tables_json(pdf_path)
-        if tables:
-            pdf_text = _format_tables_for_prompt(tables) + "\n\n" + pdf_text
-
-    return pdf_text[:40_000]   # Safety cap ~10K Tokens
 
 
 @dataclass
@@ -205,20 +154,64 @@ def build_isin_list(group_rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_analysis_messages(prompt_template: str, pdf_text: str,
-                            group_rows: list[dict]) -> tuple[str, str]:
-    """Baut (system_prompt, user_text) für einen Analyse-Call.
-    System-Prompt statisch (cachebar); ISINs + PDF in der User-Nachricht."""
+def build_analysis_messages(prompt_template: str, pdf_document: dict,
+                            group_rows: list[dict]) -> tuple[str, list]:
+    """Baut (system_prompt, user_content) für einen Analyse-Call mit NATIVEM PDF.
+
+    System-Prompt statisch (cachebar). user_content = [document-Block, Text mit
+    ISIN-Liste] — das PDF steht VOR dem Text (Anthropic-Empfehlung)."""
     isin_list = build_isin_list(group_rows)
     system_prompt = prompt_template.replace(
         "{isin_list}",
         "(Die konkret zu analysierenden ISINs/Anteilsklassen stehen in der Nutzer-Nachricht unten.)",
     )
-    user_text = (
-        f"### ZU ANALYSIERENDE ISINs / ANTEILSKLASSEN:\n{isin_list}\n\n"
-        f"### PROSPEKT-AUSZUG:\n\n{pdf_text}"
-    )
-    return system_prompt, user_text
+    user_content = [
+        pdf_document,
+        {"type": "text", "text": (
+            f"### ZU ANALYSIERENDE ISINs / ANTEILSKLASSEN:\n{isin_list}\n\n"
+            f"Klassifiziere die oben genannten ISINs/Anteilsklassen anhand des "
+            f"beigefügten Prospekt-PDFs.")},
+    ]
+    return system_prompt, user_content
+
+
+def merge_parsed_parts(parts: list[dict]) -> dict:
+    """Führt geparste Ergebnisse mehrerer PDF-Teile EINER Gruppe zusammen (bei Split).
+
+    Top-Level-Felder (fondstyp etc.): erster nicht-leerer Wert gewinnt.
+    anteilsklassen: nach ISIN bzw. Name zusammenführen, nicht-leere Felder ergänzen;
+    Reihenfolge bleibt erhalten."""
+    if len(parts) == 1:
+        return parts[0]
+
+    merged: dict = {}
+    for part in parts:
+        for k, v in part.items():
+            if k == "anteilsklassen":
+                continue
+            if v and not merged.get(k):
+                merged[k] = v
+
+    by_key: dict = {}
+    order: list = []
+    for part in parts:
+        for kl in part.get("anteilsklassen", []) or []:
+            key = ((kl.get("isin") or "").strip().upper()
+                   or (kl.get("anteilsklasse_name") or "").strip().lower())
+            if not key:
+                order.append(("__anon%d__" % len(order), kl))
+                continue
+            if key not in by_key:
+                by_key[key] = dict(kl)
+                order.append((key, None))
+            else:
+                for kk, vv in kl.items():
+                    if vv and not by_key[key].get(kk):
+                        by_key[key][kk] = vv
+
+    merged["anteilsklassen"] = [anon if anon is not None else by_key[key]
+                                for key, anon in order]
+    return merged
 
 
 def match_and_save(parsed: dict, group_rows: list[dict], model: str, wert_maps: dict):
@@ -343,10 +336,6 @@ class LLMAnalysisWorker(threading.Thread):
         self._model = model
         self._api_key = api_key
         self._provider = provider.lower()
-        # Preprocessing (Trim/Extract) nutzt das günstige Batch-Modell (Haiku/Flash),
-        # nicht das teure Analyse-Modell.
-        from llm_provider import DEFAULT_BATCH_MODELS
-        self._trim_model = DEFAULT_BATCH_MODELS.get(self._provider, model)
         self._queue = event_queue
         self._delay = delay
         self._workers = max(1, workers)
@@ -377,17 +366,17 @@ class LLMAnalysisWorker(threading.Thread):
     def _build_isin_list(self, group_rows: list[dict]) -> str:
         return build_isin_list(group_rows)
 
-    def _call_llm(self, pdf_text: str, group_rows: list[dict]) -> dict | None:
-        system_prompt, user_text = build_analysis_messages(
-            self._prompt_template, pdf_text, group_rows
+    def _call_llm(self, pdf_document: dict, group_rows: list[dict]) -> dict | None:
+        system_prompt, user_content = build_analysis_messages(
+            self._prompt_template, pdf_document, group_rows
         )
-        if self._provider == "gemini":
-            return self._call_llm_gemini(user_text, system_prompt)
-        if self._provider == "openrouter":
-            return self._call_llm_openrouter(user_text, system_prompt)
-        return self._call_llm_anthropic(user_text, system_prompt)
+        if self._provider != "anthropic":
+            raise RuntimeError(
+                "Native-PDF-Analyse wird nur für Anbieter 'anthropic' unterstützt."
+            )
+        return self._call_llm_anthropic(user_content, system_prompt)
 
-    def _call_llm_anthropic(self, user_text: str, system_prompt: str) -> dict | None:
+    def _call_llm_anthropic(self, user_content: list, system_prompt: str) -> dict | None:
         client = anthropic.Anthropic(api_key=self._api_key)
         try:
             response = client.messages.create(
@@ -396,8 +385,8 @@ class LLMAnalysisWorker(threading.Thread):
                 # cache_control nur auf dem statischen System-Prompt → Cache-Treffer ab Call 2.
                 system=[{"type": "text", "text": system_prompt,
                          "cache_control": {"type": "ephemeral"}}],
-                # User-Nachricht ist pro PDF unique → KEIN cache_control (spart den Write-Aufschlag).
-                messages=[{"role": "user", "content": user_text}],
+                # User-Nachricht (PDF + ISINs) ist pro Gruppe unique → kein cache_control.
+                messages=[{"role": "user", "content": user_content}],
             )
         except anthropic.AuthenticationError:
             raise RuntimeError("Ungültiger API-Key — bitte im Admin konfigurieren.")
@@ -424,61 +413,6 @@ class LLMAnalysisWorker(threading.Thread):
             if hasattr(block, "text"):
                 raw += block.text
 
-        return self._parse_response(raw)
-
-    def _call_llm_gemini(self, user_text: str, system_prompt: str) -> dict | None:
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError:
-            raise RuntimeError("google-genai nicht installiert. Bitte: pip install google-genai")
-
-        client = genai.Client(api_key=self._api_key)
-        try:
-            response = client.models.generate_content(
-                model=self._model,
-                contents=user_text,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    max_output_tokens=16384,
-                ),
-            )
-        except Exception as exc:
-            msg = str(exc)
-            if "UNAUTHENTICATED" in msg or "API_KEY_INVALID" in msg or "401" in msg:
-                raise RuntimeError("Ungültiger Gemini API-Key — bitte im Admin konfigurieren.")
-            if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower() or "429" in msg:
-                raise _RateLimitRetry()
-            raise RuntimeError(f"Gemini API-Fehler: {exc}")
-
-        raw = response.text if hasattr(response, "text") else ""
-        return self._parse_response(raw)
-
-    def _call_llm_openrouter(self, user_text: str, system_prompt: str) -> dict | None:
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise RuntimeError("openai nicht installiert. Bitte: pip install openai")
-
-        client = OpenAI(api_key=self._api_key, base_url="https://openrouter.ai/api/v1")
-        try:
-            response = client.chat.completions.create(
-                model=self._model,
-                max_tokens=16384,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_text},
-                ],
-            )
-        except Exception as exc:
-            msg = str(exc)
-            if "401" in msg or "invalid_api_key" in msg.lower() or "authentication" in msg.lower():
-                raise RuntimeError("Ungültiger OpenRouter API-Key — bitte im Admin konfigurieren.")
-            if "429" in msg or "rate_limit" in msg.lower() or "quota" in msg.lower():
-                raise _RateLimitRetry()
-            raise RuntimeError(f"OpenRouter API-Fehler: {exc}")
-
-        raw = (response.choices[0].message.content or "") if response.choices else ""
         return self._parse_response(raw)
 
     def _parse_response(self, text: str) -> dict | None:
@@ -534,14 +468,12 @@ class LLMAnalysisWorker(threading.Thread):
                    message=f"Analysiere: {ref_name} ({len(group_rows)} ISINs) …",
                    total=total)
 
-        # Text vorbereiten (Auto-Trim großer PDFs auf Haiku + Extraktion + Tabellen + Cap)
+        # Natives PDF aufbereiten (ganzes PDF, reduziert, oder in Teile gesplittet)
         try:
-            pdf_text = prepare_pdf_text(
-                pdf_path, trim_model=self._trim_model,
-                api_key=self._api_key, provider=self._provider,
-            )
-            if not pdf_text:
-                raise ValueError("Kein Text extrahierbar")
+            from pdf_native import prepare_pdf_documents
+            parts = prepare_pdf_documents(pdf_path)
+            if not parts:
+                raise ValueError("PDF nicht aufbereitbar")
         except Exception as exc:
             with self._lock:
                 self._failed += 1
@@ -549,47 +481,42 @@ class LLMAnalysisWorker(threading.Thread):
                        message=f"PDF-Fehler: {exc}", total=total)
             return
 
-        # LLM aufrufen — mit automatischem Retry bei Rate Limit
-        parsed = None
-        for attempt in range(1, _RATE_LIMIT_MAX_RETRIES + 1):
-            try:
-                parsed = self._call_llm(pdf_text, group_rows)
-                break
-            except _RateLimitRetry:
-                if attempt == _RATE_LIMIT_MAX_RETRIES:
-                    with self._lock:
-                        self._failed += 1
-                    self._emit("error", isin=ref_isin,
-                               message=f"Rate Limit nach {attempt} Versuchen — Gruppe übersprungen",
+        n_parts = parts[0]["n_parts"]
+        if n_parts > 1:
+            self._emit("log", isin=ref_isin,
+                       message=f"{ref_name}: {n_parts} native Teile → einzeln analysieren + mergen",
+                       total=total)
+
+        # Jeden Teil mit Rate-Limit-Retry analysieren, dann mergen
+        parsed_parts = []
+        for part in parts:
+            res = self._call_with_retry(part["block"], group_rows, ref_isin, total)
+            if res is _STOPPED:
+                return
+            if res is None:
+                if n_parts > 1:
+                    self._emit("log", isin=ref_isin,
+                               message=f"Teil {part['part']}/{n_parts} fehlgeschlagen — Rest wird verwendet",
                                total=total)
-                    return
-                h = _RATE_LIMIT_WAIT_SEC // 3600
-                self._emit("log", isin=ref_isin,
-                           message=(f"⏳ Rate Limit — warte {h}h "
-                                    f"(Versuch {attempt}/{_RATE_LIMIT_MAX_RETRIES}) …"),
-                           total=total)
-                if not self._wait_interruptible(_RATE_LIMIT_WAIT_SEC, ref_isin, total):
-                    return
-                self._emit("log", isin=ref_isin,
-                           message=f"🔄 Retry Versuch {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} …",
-                           total=total)
-            except Exception as exc:
+                    continue
                 with self._lock:
                     self._failed += 1
                 self._emit("error", isin=ref_isin,
-                           message=f"LLM-Fehler: {exc}", total=total)
+                           message="LLM-Antwort konnte nicht abgerufen/geparst werden", total=total)
                 return
+            parsed_parts.append(res)
 
-        if not parsed:
+        if not parsed_parts:
             with self._lock:
                 self._failed += 1
-            self._emit("error", isin=ref_isin,
-                       message="LLM-Antwort konnte nicht geparst werden", total=total)
+            self._emit("error", isin=ref_isin, message="Keine verwertbare Antwort", total=total)
             return
+
+        merged = merge_parsed_parts(parsed_parts)
 
         # Ergebnisse in DB schreiben
         try:
-            self._match_and_save(parsed, group_rows, self._model)
+            self._match_and_save(merged, group_rows, self._model)
         except Exception as exc:
             with self._lock:
                 self._failed += 1
@@ -599,10 +526,34 @@ class LLMAnalysisWorker(threading.Thread):
 
         with self._lock:
             self._done += 1
-        seg_summary = parsed.get("fondstyp", "?")
+        seg_summary = merged.get("fondstyp", "?")
         self._emit("progress", isin=ref_isin,
                    message=f"{ref_name} → {seg_summary} | {len(group_rows)} ISINs gesetzt",
                    total=total)
+
+    def _call_with_retry(self, pdf_document, group_rows, ref_isin, total):
+        """LLM-Aufruf für einen (Teil-)Block mit Rate-Limit-Retry.
+        Rückgabe: geparstes dict | None (endgültig fehlgeschlagen) | _STOPPED (abgebrochen)."""
+        for attempt in range(1, _RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                return self._call_llm(pdf_document, group_rows)
+            except _RateLimitRetry:
+                if attempt == _RATE_LIMIT_MAX_RETRIES:
+                    self._emit("log", isin=ref_isin,
+                               message=f"Rate Limit nach {attempt} Versuchen", total=total)
+                    return None
+                self._emit("log", isin=ref_isin,
+                           message=f"⏳ Rate Limit — warte "
+                                   f"(Versuch {attempt}/{_RATE_LIMIT_MAX_RETRIES}) …", total=total)
+                if not self._wait_interruptible(_RATE_LIMIT_WAIT_SEC, ref_isin, total):
+                    return _STOPPED
+                self._emit("log", isin=ref_isin,
+                           message=f"🔄 Retry Versuch {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES} …",
+                           total=total)
+            except Exception as exc:
+                self._emit("error", isin=ref_isin, message=f"LLM-Fehler: {exc}", total=total)
+                return None
+        return None
 
     def run(self):
         try:

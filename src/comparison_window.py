@@ -46,8 +46,7 @@ _OUT_DIR  = Path(__file__).parent.parent / "data" / "comparisons"
 
 _MODELS = [
     "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-    "claude-opus-4-7",
+    "claude-opus-4-8",
 ]
 
 _DOC_TYPES = [

@@ -22,14 +22,12 @@ BTN_BG = "#45475a"
 BTN_ACTIVE = "#585b70"
 
 BATCH_MODELS = [
-    "claude-haiku-4-5-20251001",
     "claude-sonnet-4-6",
-    "claude-opus-4-7",
+    "claude-opus-4-8",
 ]
 SINGLE_MODELS = [
     "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-    "claude-opus-4-7",
+    "claude-opus-4-8",
 ]
 
 
@@ -146,7 +144,7 @@ class AdminPanel(tk.Toplevel):
         self._combo(model_frame, "Einzel-Modell:", self.var_single_model, SINGLE_MODELS, 1)
         tk.Label(
             model_frame,
-            text="Haiku = günstig/schnell  |  Sonnet = ausgewogen  |  Opus = präzise/teuer",
+            text="Sonnet 4.6 = ausgewogen (Standard)  |  Opus 4.8 = präzise/teuer",
             bg=BG_PANEL, fg=FG_MUTED, font=("Segoe UI", 8)
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
 
@@ -414,7 +412,7 @@ class AdminPanel(tk.Toplevel):
         self.var_pdf_folder.set(os.getenv("PDF_FOLDER", "data/prospectus"))
         self.var_llm_provider.set(os.getenv("LLM_PROVIDER", "anthropic"))
         self.var_key.set(os.getenv("ANTHROPIC_API_KEY", ""))
-        self.var_batch_model.set(os.getenv("CLAUDE_BATCH_MODEL", "claude-haiku-4-5-20251001"))
+        self.var_batch_model.set(os.getenv("CLAUDE_BATCH_MODEL", "claude-sonnet-4-6"))
         self.var_single_model.set(os.getenv("CLAUDE_SINGLE_MODEL", "claude-sonnet-4-6"))
         self.var_batch_size.set(os.getenv("BATCH_SIZE", "200"))
         self.var_delay.set(os.getenv("REQUEST_DELAY", "1.5"))

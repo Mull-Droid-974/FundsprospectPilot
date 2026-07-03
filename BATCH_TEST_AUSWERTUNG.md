@@ -127,38 +127,55 @@ Prompt-Caching greift (Sonnet). **Output ($0,69) > Input ($0,50)** → bei gekap
 
 ---
 
-## Gesamtübersicht — alle fünf Läufe
+## Lauf 6 — Sonnet-Batch, VOLLTEXT ohne Trim (20 gemischte PDFs)
 
-> Läufe 1, 2, 3, 5 nutzen **verschiedene** PDF-Sätze (Absolutwerte nur indikativ). **Lauf 4 vs. Lauf 1** ist der einzige streng kontrollierte A/B-Vergleich (identische PDFs).
+- **Batch-ID:** `msgbatch_011MzmVs8SBPdyY2UL2S2Uv9` · **Modell:** `claude-sonnet-4-6` · **kein Trim** (kompletter extrahierter Text direkt in die Analyse)
+- **PDF-Satz F (neu)** · **20** PDFs gemischter Größe / **116** ISINs · 20/20, 0 Fehler
+- **Datenpunkte:** 500 (Ø 4,31/ISIN)
 
-| | Lauf 1 | Lauf 2 | Lauf 3 | Lauf 4 | Lauf 5 |
-|---|---|---|---|---|---|
-| **Was war der Lauf?** | Baseline (alles günstig) | Kompromiss | Maximaltest | Kontrollierter A/B | Opus-Test |
-| Trim-Modell | Haiku | Haiku | Sonnet | Sonnet | Sonnet |
-| Analyse-Modell | Haiku | Sonnet | Sonnet | Sonnet | **Opus 4.8** |
-| PDF-Satz | A | B | C | **A (=L1)** | E |
-| ISINs | 239 | 225 | 228 | 239 | 236 |
-| Erfolg | 50/50 | 50/50 | 50/50 | 50/50 | 50/50 |
-| Datenpunkte | 999 | 984 | 1.060 | 1.090 | 1.001 |
-| Ø Datenpunkte/ISIN | 4,18 | 4,37 | 4,65 | 4,56 | 4,24 |
-| Kosten Analyse | $0,48 | $1,39 | $1,48 | $1,29 | $2,42 |
-| Kosten Trim | ~0 | ~0 | $0,40¹ | $0,96¹ | $4,09 |
-| **Kosten gesamt** | **$0,48** | **$1,39** | **$1,87** | **$2,25** | **$6,52** |
-| $ / Datenpunkt | $0,0005 | $0,0014 | $0,0018 | $0,0021 | $0,0065 |
+| Position | Token | USD |
+|---|---|---:|
+| Analyse (Sonnet Batch, Volltext) | in 3.480.716 / out 44.750 / cr 13.760 / cw 55.040 | **$5,6620** |
+
+**Trefferquoten:** fondstyp 100%, segmentierung 100%, kundentyp 88%, anlegertyp 81%, vertriebskanal 28%, mindestanlage 20%, dienstleistung 15%.
+
+> ⚠️ **Nur 20 PDFs** → Absolutwerte nicht mit den 50er-Läufen vergleichbar; **$/PDF** und **$/Datenpunkt** sind die fairen Metriken.
+> **Zentrale Erkenntnis:** Volltext ohne Trim kostet **~$0,28/PDF** (3,48 Mio. Input-Token für 20 PDFs) — **~10× teurer pro PDF** als der getrimmte Lauf 2 (~$0,028/PDF), **ohne** erkennbaren Qualitätsvorteil. Und es ist **weiterhin Text** → Bilder/Grafiken bleiben verloren. Bestätigt: „Volltext rein" ist der teure *und* weiter verlustbehaftete Weg → der Ausweg ist **natives PDF** (siehe `REFACTOR_PLAN_native_pdf.md`), nicht Volltext-Text.
+
+---
+
+## Gesamtübersicht — alle sechs Läufe
+
+> Läufe 1, 2, 3, 5, 6 nutzen **verschiedene** PDF-Sätze (Absolutwerte nur indikativ; Lauf 6 zudem nur 20 PDFs). **Lauf 4 vs. Lauf 1** ist der einzige streng kontrollierte A/B-Vergleich (identische PDFs).
+
+| | Lauf 1 | Lauf 2 | Lauf 3 | Lauf 4 | Lauf 5 | Lauf 6 |
+|---|---|---|---|---|---|---|
+| **Was war der Lauf?** | Baseline | Kompromiss | Maximaltest | Kontroll. A/B | Opus-Test | Volltext o. Trim |
+| Trim-Modell | Haiku | Haiku | Sonnet | Sonnet | Sonnet | **keiner** |
+| Analyse-Modell | Haiku | Sonnet | Sonnet | Sonnet | **Opus 4.8** | Sonnet |
+| PDF-Satz | A | B | C | **A (=L1)** | E | F |
+| PDFs / ISINs | 50 / 239 | 50 / 225 | 50 / 228 | 50 / 239 | 50 / 236 | **20 / 116** |
+| Datenpunkte | 999 | 984 | 1.060 | 1.090 | 1.001 | 500 |
+| Ø Datenpunkte/ISIN | 4,18 | 4,37 | 4,65 | 4,56 | 4,24 | 4,31 |
+| Kosten Analyse | $0,48 | $1,39 | $1,48 | $1,29 | $2,42 | $5,66 |
+| Kosten Trim | ~0 | ~0 | $0,40¹ | $0,96¹ | $4,09 | – |
+| **Kosten gesamt** | **$0,48** | **$1,39** | **$1,87** | **$2,25** | **$6,52** | **$5,66** |
+| $ / PDF | $0,010 | $0,028 | $0,037 | $0,045 | $0,130 | **$0,283** |
+| $ / Datenpunkt | $0,0005 | $0,0014 | $0,0018 | $0,0021 | $0,0065 | **$0,0113** |
 
 ¹ Trim in Läufen 3+4 untertrieben (nur 4 bzw. 8 frische Trims; Rest gecacht). Lauf 5 (32 frische Trims) zeigt die realen Sonnet-Trim-Kosten.
 
 ### Trefferquoten pro Feld (alle Läufe)
 
-| Feld | Lauf 1 | Lauf 2 | Lauf 3 | Lauf 4 | Lauf 5 |
-|---|---|---|---|---|---|
-| fondstyp | 100% | 100% | 100% | 100% | 100% |
-| llm_segmentierung | 100% | 100% | 100% | 100% | 100% |
-| anlegertyp | 73% | 80% | 87% | 87% | 78% |
-| kundentyp | 62% | 78% | 84% | 81% | 76% |
-| vertriebskanal | 37% | 35% | 38% | 42% | 35% |
-| mindestanlage | 26% | 28% | 35% | 25% | 12% |
-| dienstleistung | 20% | 17% | 20% | 21% | 22% |
+| Feld | Lauf 1 | Lauf 2 | Lauf 3 | Lauf 4 | Lauf 5 | Lauf 6 |
+|---|---|---|---|---|---|---|
+| fondstyp | 100% | 100% | 100% | 100% | 100% | 100% |
+| llm_segmentierung | 100% | 100% | 100% | 100% | 100% | 100% |
+| anlegertyp | 73% | 80% | 87% | 87% | 78% | 81% |
+| kundentyp | 62% | 78% | 84% | 81% | 76% | 88% |
+| vertriebskanal | 37% | 35% | 38% | 42% | 35% | 28% |
+| mindestanlage | 26% | 28% | 35% | 25% | 12% | 20% |
+| dienstleistung | 20% | 17% | 20% | 21% | 22% | 15% |
 
 ---
 
@@ -180,6 +197,9 @@ Prompt-Caching greift (Sonnet). **Output ($0,69) > Input ($0,50)** → bei gekap
 6. **`fondstyp`/`segmentierung`:** alle Modelle 100% — hier reicht Haiku. Aber 36% Sonnet-Abweichung bei `segmentierung` → Genauigkeit stichprobenartig gegen Referenz prüfen.
 7. **Output verschlanken:** Output dominiert die Kosten (Lauf 2: $0,69 Output vs $0,50 Input; bei Opus noch stärker). Kompaktes JSON / kürzere `begründung` / optionale `*_roh` senken den größten Einzelposten.
 8. **Hochrechnung Gesamtkorpus** (~4.531 Gruppen, nur Analyse): Lauf-2-Kombi grob **~$125** (× $1,39/50). Opus-Weg wäre um ein Vielfaches teurer (~$220 Analyse + ~$370 frischer Sonnet-Trim). Batch-Limits auf jedem Tier unkritisch; einziger Engpass wäre synchrones Sonnet-Trimming (ITPM) → Trim minimieren/auf Haiku/batchen.
+9. **Lauf 6 (Volltext ohne Trim):** bestätigt, dass „ganzes PDF als Text rein" der **teuerste** Weg pro PDF ist (**~$0,28/PDF, ~10× Lauf 2**) **ohne** Qualitätsgewinn — und weiterhin **Text**, also Bilder/Grafiken/komplexe Tabellen bleiben verloren.
+
+> **Neue Richtung (überholt Empfehlungen 2–4):** Nach diesen Läufen ist die Entscheidung gefallen, auf **natives PDF (Vision)** umzubauen — Analyse bekommt die Seite visuell (kein Extraktionsverlust), große PDFs werden auf relevante Seiten reduziert, **kein Haiku mehr**. Details: **`docs/REFACTOR_PLAN_native_pdf.md`**. Die obigen Haiku-Trim-Empfehlungen sind damit historischer Testbefund, nicht mehr die Zielarchitektur.
 
 ---
 
