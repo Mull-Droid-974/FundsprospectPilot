@@ -131,6 +131,20 @@ def get_all_morningstar() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_umbrella_map() -> dict:
+    """Leichte ISIN → ms_umbrella (Branding/Fund Family) Zuordnung.
+
+    Wird von der Struktur- und Prospekte-Ansicht genutzt, um die Umbrella-Ebene
+    einheitlich aus Morningstar-Branding abzuleiten (keine ms_raw_json geladen)."""
+    ensure_morningstar_table()
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT isin, ms_umbrella FROM morningstar_data "
+            "WHERE ms_umbrella IS NOT NULL AND ms_umbrella != ''"
+        ).fetchall()
+    return {r["isin"]: r["ms_umbrella"] for r in rows}
+
+
 def get_isins_without_morningstar() -> list[str]:
     """Gibt alle ISINs aus fund_results zurück, für die noch kein MS-Datensatz existiert."""
     ensure_morningstar_table()

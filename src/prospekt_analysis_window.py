@@ -11,6 +11,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from collections import Counter
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
@@ -33,12 +34,12 @@ ACCENT_LAVENDER = "#b4befe"
 BTN_BG          = "#45475a"
 BTN_ACTIVE      = "#585b70"
 
-# Analyse-Modelle: bewusst OHNE Haiku — der A/B-Test zeigte zu schwache
-# Klassifizierung (kundentyp/fondstyp). Haiku wird nur fürs Preprocessing (Trim)
-# verwendet. Kostenersparnis kommt aus Trim-auf-Haiku + Batch-API (−50%).
+# Analyse-Modelle: Sonnet 4.6 (Standard) und Opus 4.8. Kein Haiku (zu schwache
+# Klassifizierung). Kostenersparnis kommt aus der Batch-API (−50%) + nativem PDF
+# mit Seiten-Reduktion großer Dateien (kein separater Trim-Modell-Schritt mehr).
 MODELS = [
     "claude-sonnet-4-6",
-    "claude-opus-4-7",
+    "claude-opus-4-8",
 ]
 
 DEFAULT_PROMPT = """\
@@ -371,13 +372,10 @@ class ProspektAnalysisWindow(tk.Toplevel):
 
     @staticmethod
     def _analysis_models(provider: str) -> list[str]:
-        """Modelle für die Analyse — ohne das günstige Batch-Modell (z.B. Haiku),
-        das für die Klassifizierung zu schwach ist. Trim/Preprocessing nutzt es separat."""
-        from llm_provider import get_models, DEFAULT_BATCH_MODELS
-        models = list(get_models(provider))
-        batch = DEFAULT_BATCH_MODELS.get(provider)
-        filtered = [m for m in models if m != batch]
-        return filtered or models
+        """Modelle für die Analyse (Sonnet/Opus). Kein separates, schwächeres
+        Batch-/Trim-Modell mehr — natives PDF + Seiten-Reduktion ersetzen das Trimmen."""
+        from llm_provider import get_models
+        return list(get_models(provider))
 
     def _on_provider_changed(self, _event=None):
         from llm_provider import DEFAULT_SINGLE_MODELS
@@ -560,6 +558,13 @@ class ProspektAnalysisWindow(tk.Toplevel):
     def _refresh_data(self):
         all_rows = results_store.get_all_results()
 
+        # Umbrella einheitlich aus Morningstar-Branding (identisch zur Struktur-Ansicht)
+        try:
+            import morningstar_store
+            ms_umb = morningstar_store.get_umbrella_map()
+        except Exception:
+            ms_umb = {}
+
         raw: dict[str, list] = {}
         for row in all_rows:
             key = row.get("subfonds_id") or f"__single_{row['isin']}"
@@ -588,13 +593,14 @@ class ProspektAnalysisWindow(tk.Toplevel):
             else:
                 status = "pending"
 
-            # Umbrella-Anzeigename aus fondsname ableiten
-            umbrella_id = rows[0].get("umbrella_id", "")
-            if umbrella_id:
-                fn = rows[0].get("fondsname", "")
-                umbrella_disp = fn.split(" - ")[0][:40] if " - " in fn else (fn[:40] or umbrella_id[:20])
+            # Umbrella = Morningstar-Branding (most-common je Subfonds), identisch zur
+            # Struktur-Ansicht; Fallback auf Fondsname-Heuristik, wenn kein Branding da ist
+            brandings = [ms_umb[r["isin"]] for r in rows if ms_umb.get(r["isin"])]
+            if brandings:
+                umbrella_disp = Counter(brandings).most_common(1)[0][0]
             else:
-                umbrella_disp = "—"
+                fn = rows[0].get("fondsname", "")
+                umbrella_disp = (fn.split(" - ")[0][:40] if " - " in fn else fn[:40]) or "—"
 
             # Subfonds-Anzeigename
             sf_name = (

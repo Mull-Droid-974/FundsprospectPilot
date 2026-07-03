@@ -132,6 +132,14 @@ class ResultsWindow(tk.Toplevel):
             activebackground=BTN_ACTIVE,
         ).pack(side="right", padx=(4, 0))
 
+        tk.Button(
+            inner, text="🗂 Struktur-Ansicht",
+            command=self._open_struktur,
+            bg=BTN_BG, fg=ACCENT_BLUE, relief="flat",
+            font=("Segoe UI", 9, "bold"), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE,
+        ).pack(side="right", padx=(4, 0))
+
         # ── Suchleiste ────────────────────────────────────────────
         search_bar = tk.Frame(self, bg=BG_MAIN)
         search_bar.pack(fill="x", padx=12, pady=(8, 4))
@@ -238,6 +246,17 @@ class ResultsWindow(tk.Toplevel):
         """Liest alle Einträge aus der DB und zeigt sie an."""
         self._all_rows = results_store.get_all_results()
         self._apply_filter()
+
+    def _open_struktur(self):
+        """Öffnet die hierarchische, MS-angereicherte Struktur-Ansicht."""
+        try:
+            from struktur_window import StrukturWindow
+            win = getattr(self, "_struktur_win", None)
+            if win is not None and win.winfo_exists():
+                win.deiconify(); win.lift(); win.focus_force(); return
+            self._struktur_win = StrukturWindow(self)
+        except Exception as exc:
+            messagebox.showerror("Struktur-Ansicht", f"Konnte nicht geöffnet werden:\n{exc}")
 
     def _apply_filter(self):
         """Filtert die angezeigten Zeilen nach dem Suchbegriff."""
