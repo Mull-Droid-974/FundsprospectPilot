@@ -283,6 +283,19 @@ class ProspektAnalysisWindow(tk.Toplevel):
         )
         self.btn_stop.pack(side="right", padx=(4, 0))
 
+        btn_struktur = tk.Button(
+            inner, text="🗂  Struktur-Ansicht",
+            command=self._open_struktur,
+            bg=BTN_BG, fg=ACCENT_GREEN, relief="flat",
+            font=("Segoe UI", 9, "bold"), padx=10, pady=3, cursor="hand2",
+            activebackground=BTN_ACTIVE,
+        )
+        btn_struktur.pack(side="right", padx=(4, 0))
+        _Tooltip(btn_struktur,
+            "Öffnet die hierarchische, Morningstar-angereicherte Struktur-Ansicht\n"
+            "(Umbrella → Portfolio → Anteilsklasse) mit Identifiern, MS-Feldern\n"
+            "und Konsistenz-Prüfung (🟢/🟡/🔴).")
+
         btn_prompt = tk.Button(
             inner, text="✏  Prompt",
             command=self._open_prompt_editor,
@@ -946,6 +959,18 @@ class ProspektAnalysisWindow(tk.Toplevel):
     def _open_typologie(self):
         from typologie_window import TypologieWindow
         TypologieWindow(self)
+
+    def _open_struktur(self):
+        """Öffnet die hierarchische, MS-angereicherte Struktur-Ansicht."""
+        try:
+            from struktur_window import StrukturWindow
+            win = getattr(self, "_struktur_win", None)
+            if win is not None and win.winfo_exists():
+                win.deiconify(); win.lift(); win.focus_force(); return
+            self._struktur_win = StrukturWindow(self)
+        except Exception as exc:
+            messagebox.showerror("Struktur-Ansicht",
+                                 f"Konnte nicht geöffnet werden:\n{exc}", parent=self)
 
     def _open_prompt_editor(self):
         dlg = tk.Toplevel(self)
